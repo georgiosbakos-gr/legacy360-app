@@ -1,15 +1,24 @@
-import math
+import os
+from io import BytesIO
+from datetime import datetime
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-# ---------------------------
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+from reportlab.lib.units import mm
+
+
+# =========================
 # Data model
-# ---------------------------
+# =========================
 
 @dataclass
 class Domain:
@@ -51,7 +60,6 @@ DOMAIN_LABELS = {
     }
 }
 
-# 4 questions per domain (v1)
 QUESTIONS: List[Question] = [
     # Corporate Governance
     Question("1.1", "corp_gov", {
@@ -163,9 +171,9 @@ QUESTIONS: List[Question] = [
 ]
 
 
-# ---------------------------
-# Language strings
-# ---------------------------
+# =========================
+# UI strings
+# =========================
 
 UI = {
     "GR": {
@@ -174,7 +182,7 @@ UI = {
         "intro_title": "Αυτοαξιολόγηση (Self-completed)",
         "intro_body": (
             "Συμπληρώστε την αξιολόγηση με βάση την πραγματική κατάσταση. "
-            "Στο τέλος θα δείτε συνοπτικό dashboard, δείκτες ωριμότητας, συγκέντρωση κινδύνων και προτεραιότητες."
+            "Στο τέλος θα δείτε dashboard, προτεραιότητες και δυνατότητα εξαγωγής PDF/CSV."
         ),
         "scale_title": "Κλίμακα Ωριμότητας 1–5 (Ορισμοί)",
         "scale": {
@@ -184,19 +192,25 @@ UI = {
             4: "Ενσωματωμένο & αποτελεσματικό: σαφές, συνεπές, υποστηρίζει ποιοτικές αποφάσεις.",
             5: "Προηγμένο / Πρότυπο: πλήρως ενσωματωμένο, με συστηματική αναθεώρηση και υψηλή ωριμότητα."
         },
-        "start": "Ξεκινήστε την αξιολόγηση",
-        "domain_tab": "Ενότητα",
-        "question_help": "Επιλέξτε βαθμό 1–5.",
+        "question_help": "Επιλέξτε βαθμό 1–5 για να συνεχίσετε.",
         "results": "Αποτελέσματα",
         "overall_index": "Συνολικός Δείκτης Ωριμότητας (0–100)",
         "priority_title": "Κορυφαίες Προτεραιότητες (Top Focus Areas)",
-        "download": "Λήψη αποτελεσμάτων (CSV)",
-        "incomplete": "Υπάρχουν ερωτήσεις χωρίς απάντηση. Παρακαλώ συμπληρώστε όλες τις ερωτήσεις.",
+        "download_csv": "Λήψη CSV",
+        "download_pdf": "Λήψη PDF",
+        "incomplete_domain": "Απαιτείται απάντηση σε όλες τις ερωτήσεις της ενότητας για να προχωρήσετε.",
+        "incomplete_all": "Υπάρχουν ερωτήσεις χωρίς απάντηση. Παρακαλώ συμπληρώστε όλες τις ερωτήσεις.",
         "interpretations": "Ερμηνεία & Επιπτώσεις Συζήτησης",
         "overall_interp_title": "Συνοπτική Ερμηνεία",
         "risk_matrix": "Χάρτης Συγκέντρωσης Κινδύνου (Score × Weight)",
         "radar": "Radar Ωριμότητας",
         "bars": "Ανά Ενότητα (Μέσος Όρος 1–5)",
+        "submit_info": "Πατήστε Υποβολή για να κλειδώσετε τα αποτελέσματα.",
+        "submit_btn": "✅ Υποβολή / Submit",
+        "back_btn": "⬅️ Προηγούμενο / Previous",
+        "next_btn": "Επόμενη Ενότητα / Next Section ➡️",
+        "see_results_btn": "Δες τα Αποτελέσματα / See Results 📊",
+        "missing_count": "Απομένουν {n} ερωτήσεις χωρίς απάντηση σε αυτή την ενότητα.",
     },
     "EN": {
         "app_title": "Legacy360° | Family Governance & Succession Roadmap",
@@ -204,7 +218,7 @@ UI = {
         "intro_title": "Self-completed assessment",
         "intro_body": (
             "Complete the assessment based on current reality. "
-            "At the end you will receive a dashboard with maturity scores, risk concentration and priorities."
+            "At the end you will receive a dashboard with priorities and PDF/CSV export."
         ),
         "scale_title": "Maturity Scale 1–5 (Anchors)",
         "scale": {
@@ -214,19 +228,25 @@ UI = {
             4: "Embedded & effective: clearly defined and consistently applied; supports decision quality.",
             5: "Advanced / role model: fully embedded, continuously reviewed; maturity beyond peers."
         },
-        "start": "Start assessment",
-        "domain_tab": "Domain",
-        "question_help": "Select a score 1–5.",
+        "question_help": "Select a score 1–5 to continue.",
         "results": "Results",
         "overall_index": "Overall Maturity Index (0–100)",
         "priority_title": "Top Focus Areas",
-        "download": "Download results (CSV)",
-        "incomplete": "Some questions are unanswered. Please complete all questions.",
+        "download_csv": "Download CSV",
+        "download_pdf": "Download PDF",
+        "incomplete_domain": "All questions in this section must be answered to proceed.",
+        "incomplete_all": "Some questions are unanswered. Please complete all questions.",
         "interpretations": "Interpretation & Discussion Implications",
         "overall_interp_title": "Executive Summary Interpretation",
         "risk_matrix": "Risk Concentration Map (Score × Weight)",
         "radar": "Maturity Radar",
         "bars": "By Domain (Average 1–5)",
+        "submit_info": "Press Submit to lock results.",
+        "submit_btn": "✅ Submit",
+        "back_btn": "⬅️ Previous",
+        "next_btn": "Next Section ➡️",
+        "see_results_btn": "See Results 📊",
+        "missing_count": "{n} questions remain unanswered in this section.",
     }
 }
 
@@ -241,7 +261,6 @@ BAND_LABELS = {
     "EN": {"RED": "RED", "AMBER": "AMBER", "GREEN": "GREEN"},
 }
 
-# Simple domain interpretation templates by band (v1)
 DOMAIN_INTERP = {
     "GR": {
         "RED": "Υπάρχουν ουσιαστικά κενά δομής/εφαρμογής. Ο κίνδυνος κλιμάκωσης (σύγκρουση, καθυστερήσεις, ασυνέπεια αποφάσεων) είναι αυξημένος.",
@@ -257,21 +276,21 @@ DOMAIN_INTERP = {
 
 OVERALL_INTERP = {
     "GR": {
-        "RED": "Το συνολικό προφίλ ωριμότητας υποδηλώνει υψηλό διακυβερνητικό και εκτελεστικό κίνδυνο. Συνιστάται άμεση εστίαση στα κρίσιμα πεδία πριν από μεγάλες δεσμεύσεις (επενδύσεις, διαδοχή, εξωτερική ανάπτυξη).",
-        "AMBER": "Υπάρχει λειτουργική βάση, αλλά η ωριμότητα δεν είναι ακόμη συστηματικά ενσωματωμένη. Με στοχευμένες παρεμβάσεις σε υψηλού βάρους ενότητες, η επιχείρηση μπορεί να μειώσει σημαντικά τον κίνδυνο και να ενισχύσει τη συνέχεια.",
+        "RED": "Το συνολικό προφίλ ωριμότητας υποδηλώνει υψηλό διακυβερνητικό και εκτελεστικό κίνδυνο. Συνιστάται άμεση εστίαση στα κρίσιμα πεδία πριν από μεγάλες δεσμεύσεις (επενδύσεις, διαδοχή, ανάπτυξη).",
+        "AMBER": "Υπάρχει λειτουργική βάση, αλλά η ωριμότητα δεν είναι ακόμη συστηματικά ενσωματωμένη. Με στοχευμένες παρεμβάσεις σε υψηλού βάρους ενότητες, μειώνεται σημαντικά ο κίνδυνος και ενισχύεται η συνέχεια.",
         "GREEN": "Το προφίλ δείχνει ισχυρή ωριμότητα. Προτεραιότητα: διατήρηση πειθαρχίας, περιοδικές αναθεωρήσεις και προληπτική προετοιμασία διαδοχής/συνέχειας.",
     },
     "EN": {
-        "RED": "The overall maturity profile indicates elevated governance and execution risk. Prioritise critical areas before major commitments (investments, succession moves, external expansion).",
+        "RED": "The overall maturity profile indicates elevated governance and execution risk. Prioritise critical areas before major commitments (investments, succession moves, expansion).",
         "AMBER": "A functional base exists, but maturity is not yet consistently embedded. Targeted interventions in high-weight domains can materially reduce risk and strengthen continuity.",
         "GREEN": "The profile indicates strong maturity. Maintain discipline, run periodic reviews and proactively prepare succession/continuity.",
     }
 }
 
 
-# ---------------------------
-# Scoring helpers
-# ---------------------------
+# =========================
+# Scoring & charts
+# =========================
 
 def band_for_score(score: float) -> str:
     for b, lo, hi in BANDS:
@@ -286,17 +305,14 @@ def weighted_index(domain_scores: Dict[str, float]) -> float:
         if np.isnan(s):
             return np.nan
         total += s * d.weight
-    # Convert 1–5 to 0–100
-    # 1 => 0, 5 => 100
+    # Convert 1–5 to 0–100: 1 => 0, 5 => 100
     return (total - 1.0) / 4.0 * 100.0
 
-def risk_priority(domain_key: str, score: float, weight: float) -> float:
+def risk_priority(score: float, weight: float) -> float:
     # Higher risk when score is low and weight is high
-    # Normalise: risk = (6 - score) * weight
     return (6.0 - score) * weight
 
 def make_radar(labels: List[str], values: List[float], title: str):
-    # Close the loop
     r = values + [values[0]]
     theta = labels + [labels[0]]
     fig = go.Figure()
@@ -311,25 +327,235 @@ def make_radar(labels: List[str], values: List[float], title: str):
     return fig
 
 
-# ---------------------------
-# UI
-# ---------------------------
+# =========================
+# PDF export (ReportLab)
+# =========================
+
+def build_pdf_report(
+    lang: str,
+    df_domains: pd.DataFrame,
+    overall_0_100: float,
+    overall_band: str,
+    answers_df: pd.DataFrame,
+    legacy_logo_path: str,
+    strategize_logo_path: str,
+) -> bytes:
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=18*mm, rightMargin=18*mm, topMargin=16*mm, bottomMargin=16*mm
+    )
+
+    styles = getSampleStyleSheet()
+    base = ParagraphStyle("base", parent=styles["BodyText"], fontName="Helvetica", fontSize=10, leading=13)
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=16, leading=18, spaceAfter=8)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=14, spaceAfter=6)
+    small = ParagraphStyle("small", parent=base, fontSize=9, leading=12)
+
+    navy = colors.HexColor("#0B2C5D")
+    gold = colors.HexColor("#C7922B")
+
+    L = {
+        "GR": {
+            "report_title": "Αναφορά Αποτελεσμάτων",
+            "date": "Ημερομηνία",
+            "overall": "Συνολικός Δείκτης Ωριμότητας (0–100)",
+            "summary": "Σύνοψη ανά Ενότητα",
+            "domain": "Ενότητα",
+            "weight": "Βάρος",
+            "score": "Βαθμός (1–5)",
+            "status": "Κατάσταση",
+            "risk": "Κίνδυνος",
+            "priorities": "Κορυφαίες Προτεραιότητες (Top Focus Areas)",
+            "interpretation": "Συνοπτική Ερμηνεία",
+            "appendix": "Παράρτημα: Απαντήσεις",
+            "question": "Ερώτηση",
+        },
+        "EN": {
+            "report_title": "Results Report",
+            "date": "Date",
+            "overall": "Overall Maturity Index (0–100)",
+            "summary": "Domain Summary",
+            "domain": "Domain",
+            "weight": "Weight",
+            "score": "Score (1–5)",
+            "status": "Status",
+            "risk": "Risk",
+            "priorities": "Top Focus Areas",
+            "interpretation": "Executive Summary Interpretation",
+            "appendix": "Appendix: Responses",
+            "question": "Question",
+        }
+    }[lang]
+
+    story = []
+
+    # Header logos
+    def try_image(path: str, width_mm: float):
+        try:
+            if path and os.path.exists(path):
+                img = Image(path, width=width_mm*mm, height=width_mm*mm*0.38)
+                return img
+        except Exception:
+            pass
+        return None
+
+    legacy_img = try_image(legacy_logo_path, 60)
+    strat_img = try_image(strategize_logo_path, 55)
+
+    left_stack = []
+    if legacy_img:
+        left_stack.append(legacy_img)
+    left_stack.append(Paragraph(f"<font color='{navy.hexval()}'><b>Legacy360° | Family Governance & Succession Roadmap</b></font>", h2))
+    left_stack.append(Paragraph(f"<font color='{gold.hexval()}'>a Strategize service</font>", small))
+
+    right_stack = []
+    if strat_img:
+        strat_img.hAlign = "RIGHT"
+        right_stack.append(strat_img)
+
+    header_tbl = Table([[left_stack, right_stack]], colWidths=[120*mm, 55*mm])
+    header_tbl.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("ALIGN", (1,0), (1,0), "RIGHT"),
+        ("LEFTPADDING", (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+        ("TOPPADDING", (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+    ]))
+    story.append(header_tbl)
+    story.append(Table([[""]], colWidths=[175*mm], style=TableStyle([("LINEBELOW",(0,0),(-1,-1),1,gold)])))
+    story.append(Spacer(1, 10))
+
+    today = datetime.now().strftime("%d/%m/%Y")
+    story.append(Paragraph(L["report_title"], h1))
+    story.append(Paragraph(f"{L['date']}: {today}", base))
+    story.append(Spacer(1, 10))
+
+    story.append(Paragraph(f"<b>{L['overall']}:</b> <font color='{navy.hexval()}'>{overall_0_100:.1f}</font>", h2))
+    story.append(Paragraph(OVERALL_INTERP[lang][overall_band], base))
+    story.append(Spacer(1, 12))
+
+    # Domain summary table
+    story.append(Paragraph(L["summary"], h2))
+
+    dd = df_domains.copy()
+    dd["Weight%"] = (dd["weight"] * 100).round(0).astype(int)
+    dd["Avg"] = dd["avg_score"].round(2)
+    dd["Risk"] = dd["risk"].round(3)
+
+    table_data = [[L["domain"], L["weight"], L["score"], L["status"], L["risk"]]]
+    for _, r in dd.sort_values("risk", ascending=False).iterrows():
+        table_data.append([
+            r["domain"],
+            f"{int(r['Weight%'])}%",
+            f"{r['Avg']:.2f}",
+            BAND_LABELS[lang][r["band"]],
+            f"{r['Risk']:.3f}",
+        ])
+
+    dom_tbl = Table(table_data, colWidths=[75*mm, 20*mm, 22*mm, 26*mm, 22*mm])
+    dom_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), navy),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,0), 10),
+        ("ALIGN", (1,1), (-1,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("GRID", (0,0), (-1,-1), 0.4, colors.lightgrey),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.white]),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+    ]))
+    story.append(dom_tbl)
+    story.append(Spacer(1, 10))
+
+    # Priorities
+    story.append(Paragraph(L["priorities"], h2))
+    top5 = dd.sort_values("risk", ascending=False).head(5)
+    for i, r in enumerate(top5.to_dict(orient="records"), start=1):
+        story.append(Paragraph(
+            f"<b>{i}. {r['domain']}</b> — {L['score']}: {r['Avg']:.2f} · {L['weight']}: {int(r['Weight%'])}% · {L['status']}: {BAND_LABELS[lang][r['band']]}",
+            base
+        ))
+        story.append(Paragraph(DOMAIN_INTERP[lang][r["band"]], small))
+        story.append(Spacer(1, 4))
+
+    story.append(Spacer(1, 10))
+
+    # Appendix with answers
+    story.append(PageBreak())
+    story.append(Paragraph(L["appendix"], h2))
+
+    a = answers_df.copy()
+    a["domain"] = a["domain_gr"] if lang == "GR" else a["domain_en"]
+    a["question"] = a["question_gr"] if lang == "GR" else a["question_en"]
+
+    qa_data = [["ID", L["domain"], L["question"], L["score"]]]
+    for _, rr in a.iterrows():
+        qa_data.append([rr["question_id"], rr["domain"], rr["question"], str(rr["score"])])
+
+    qa_tbl = Table(qa_data, colWidths=[12*mm, 40*mm, 105*mm, 15*mm], repeatRows=1)
+    qa_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), navy),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,0), 9),
+        ("FONTSIZE", (0,1), (-1,-1), 8),
+        ("ALIGN", (0,0), (0,-1), "CENTER"),
+        ("ALIGN", (-1,0), (-1,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("GRID", (0,0), (-1,-1), 0.3, colors.lightgrey),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.white]),
+        ("LEFTPADDING", (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING", (0,0), (-1,-1), 3),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+    ]))
+    story.append(qa_tbl)
+
+    doc.build(story)
+    pdf_bytes = buf.getvalue()
+    buf.close()
+    return pdf_bytes
+
+
+# =========================
+# App setup
+# =========================
 
 st.set_page_config(page_title="Legacy360°", layout="wide")
 
-# Language selector (Greek primary)
+# Language selector (Greek default)
 lang = st.sidebar.radio("Language / Γλώσσα", ["GR", "EN"], index=0)
 
-# Header (logo placeholders)
-left, right = st.columns([0.75, 0.25], vertical_alignment="center")
-with left:
+# Assets paths (Cloud-safe)
+BASE_DIR = os.path.dirname(__file__)
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+LEGACY_LOGO = os.path.join(ASSETS_DIR, "legacy360.png")
+STRATEGIZE_LOGO = os.path.join(ASSETS_DIR, "strategize.png")
+
+# Header with logos
+header_left, header_right = st.columns([0.68, 0.32], vertical_alignment="center")
+
+with header_left:
+    if os.path.exists(LEGACY_LOGO):
+        st.image(LEGACY_LOGO, width=280)
+    else:
+        st.warning("Legacy360 logo not found in assets/ (legacy360.png)")
     st.title(UI[lang]["app_title"])
     st.caption(UI[lang]["tagline"])
-with right:
-    # Placeholder for logos:
-    st.markdown("**[Legacy360° Logo Placeholder]**  \n*a Strategize service*")
 
-st.divider()
+with header_right:
+    if os.path.exists(STRATEGIZE_LOGO):
+        st.image(STRATEGIZE_LOGO, width=240)
+    else:
+        st.warning("Strategize logo not found in assets/ (strategize.png)")
+
+st.markdown("<hr style='border:1px solid #C7922B; margin-top:10px; margin-bottom:10px;'>", unsafe_allow_html=True)
 
 # Intro + scale
 colA, colB = st.columns([0.55, 0.45])
@@ -343,66 +569,173 @@ with colB:
 
 st.divider()
 
-# Build question groups per domain
+# Group questions per domain
 domain_questions: Dict[str, List[Question]] = {d.key: [] for d in DOMAINS}
 for q in QUESTIONS:
     domain_questions[q.domain_key].append(q)
 
-tabs = st.tabs([f"🧭 {DOMAIN_LABELS[lang][d.key]}" for d in DOMAINS] + [f"📊 {UI[lang]['results']}"])
+TOTAL_QUESTIONS = len(QUESTIONS)
 
-# Session state init
+# Session state
 if "answers" not in st.session_state:
-    st.session_state["answers"] = {}  # question_id -> score
+    # None means unanswered (no preselection)
+    st.session_state["answers"] = {q.id: None for q in QUESTIONS}
 
-def render_domain_tab(domain: Domain, tab):
-    with tab:
-        st.markdown(f"### {DOMAIN_LABELS[lang][domain.key]}")
-        st.caption(f"Weight / Βάρος: **{int(domain.weight*100)}%**")
+if "step" not in st.session_state:
+    # 0..len(DOMAINS)-1 domain steps, len(DOMAINS)=results
+    st.session_state["step"] = 0
+
+if "submitted" not in st.session_state:
+    st.session_state["submitted"] = False
+
+
+# Helpers
+def answered_count() -> int:
+    return sum(1 for v in st.session_state["answers"].values() if v is not None)
+
+def completion_ratio() -> float:
+    return answered_count() / TOTAL_QUESTIONS
+
+def domain_question_ids(domain_key: str) -> List[str]:
+    return [q.id for q in domain_questions[domain_key]]
+
+def domain_is_complete(domain_key: str) -> bool:
+    return all(st.session_state["answers"][qid] is not None for qid in domain_question_ids(domain_key))
+
+def go_next():
+    st.session_state["step"] = min(st.session_state["step"] + 1, len(DOMAINS))
+    st.rerun()
+
+def go_prev():
+    st.session_state["step"] = max(st.session_state["step"] - 1, 0)
+    st.rerun()
+
+def go_results():
+    st.session_state["step"] = len(DOMAINS)
+    st.rerun()
+
+
+# Progress UI
+st.markdown("### Progress / Πρόοδος")
+pct = int(round(completion_ratio() * 100))
+st.progress(completion_ratio())
+st.caption(f"{pct}% ({answered_count()}/{TOTAL_QUESTIONS})")
+
+st.divider()
+
+# Sidebar navigation (optional)
+with st.sidebar:
+    st.markdown("### Navigation / Πλοήγηση")
+    nav_labels = [f"{i+1}. {DOMAIN_LABELS[lang][d.key]}" for i, d in enumerate(DOMAINS)] + ["📊 Results / Αποτελέσματα"]
+    sel = st.radio(
+        " ",
+        options=list(range(len(DOMAINS) + 1)),
+        format_func=lambda i: nav_labels[i],
+        index=st.session_state["step"],
+        key="nav_radio"
+    )
+    if sel != st.session_state["step"]:
+        st.session_state["step"] = sel
+        st.rerun()
+
+
+# =========================
+# DOMAIN PAGES (wizard)
+# =========================
+if st.session_state["step"] < len(DOMAINS):
+    d = DOMAINS[st.session_state["step"]]
+    dom_key = d.key
+
+    st.markdown(f"## 🧭 {DOMAIN_LABELS[lang][dom_key]}")
+    st.caption(f"Weight / Βάρος: **{int(d.weight*100)}%**")
+    st.write("")
+
+    # Questions (no preselection)
+    for q in domain_questions[dom_key]:
+        key = f"ans_{q.id}"
+        options = ["—"] + [1, 2, 3, 4, 5]
+        current = st.session_state["answers"][q.id]
+        idx = 0 if current is None else options.index(current)
+
+        choice = st.selectbox(
+            label=f"**{q.id}** — {q.text[lang]}",
+            options=options,
+            index=idx,
+            help=UI[lang]["question_help"],
+            key=key
+        )
+
+        st.session_state["answers"][q.id] = None if choice == "—" else int(choice)
         st.write("")
-        for q in domain_questions[domain.key]:
-            key = f"ans_{q.id}"
-            default = st.session_state["answers"].get(q.id, 3)
-            score = st.radio(
-                label=f"**{q.id}** — {q.text[lang]}",
-                options=[1, 2, 3, 4, 5],
-                index=[1, 2, 3, 4, 5].index(default),
-                horizontal=True,
-                help=UI[lang]["question_help"],
-                key=key
+
+    # Validation message (domain)
+    missing_in_domain = [qid for qid in domain_question_ids(dom_key) if st.session_state["answers"][qid] is None]
+    if missing_in_domain:
+        st.warning(UI[lang]["missing_count"].format(n=len(missing_in_domain)))
+
+    st.divider()
+
+    # Bottom navigation buttons
+    left_btn, right_btn = st.columns([0.35, 0.65])
+
+    with left_btn:
+        if st.session_state["step"] > 0:
+            st.button(UI[lang]["back_btn"], use_container_width=True, on_click=go_prev)
+
+    with right_btn:
+        is_last_domain = (st.session_state["step"] == len(DOMAINS) - 1)
+        can_proceed = domain_is_complete(dom_key)
+
+        if not is_last_domain:
+            st.button(
+                UI[lang]["next_btn"],
+                use_container_width=True,
+                disabled=not can_proceed,
+                on_click=go_next
             )
-            st.session_state["answers"][q.id] = score
-            st.write("")
+        else:
+            st.button(
+                UI[lang]["see_results_btn"],
+                use_container_width=True,
+                disabled=not can_proceed,
+                on_click=go_results
+            )
 
-# Render domain tabs
-for i, d in enumerate(DOMAINS):
-    render_domain_tab(d, tabs[i])
 
-# Results tab
-with tabs[-1]:
-    st.markdown(f"## {UI[lang]['results']}")
+# =========================
+# RESULTS PAGE
+# =========================
+else:
+    st.markdown(f"## 📊 {UI[lang]['results']}")
 
-    # Validate completeness
-    all_ids = [q.id for q in QUESTIONS]
-    missing = [qid for qid in all_ids if qid not in st.session_state["answers"]]
-    if missing:
-        st.error(UI[lang]["incomplete"])
+    # Global validation
+    if answered_count() < TOTAL_QUESTIONS:
+        st.error(UI[lang]["incomplete_all"])
+        st.button(UI[lang]["back_btn"], on_click=go_prev)
         st.stop()
 
-    # Compute domain averages
+    # Submit (lock)
+    if not st.session_state["submitted"]:
+        st.info(UI[lang]["submit_info"])
+        if st.button(UI[lang]["submit_btn"], use_container_width=True):
+            st.session_state["submitted"] = True
+            st.rerun()
+        st.stop()
+
+    # Compute domain scores
     domain_scores: Dict[str, float] = {}
     rows = []
-    for d in DOMAINS:
-        qs = domain_questions[d.key]
-        vals = [st.session_state["answers"][q.id] for q in qs]
+    for dd in DOMAINS:
+        vals = [st.session_state["answers"][q.id] for q in domain_questions[dd.key]]
         avg = float(np.mean(vals))
-        domain_scores[d.key] = avg
+        domain_scores[dd.key] = avg
         rows.append({
-            "domain_key": d.key,
-            "domain": DOMAIN_LABELS[lang][d.key],
-            "weight": d.weight,
+            "domain_key": dd.key,
+            "domain": DOMAIN_LABELS[lang][dd.key],
+            "weight": dd.weight,
             "avg_score": avg,
             "band": band_for_score(avg),
-            "risk": risk_priority(d.key, avg, d.weight),
+            "risk": risk_priority(avg, dd.weight),
         })
 
     df = pd.DataFrame(rows).sort_values("risk", ascending=False)
@@ -419,7 +752,6 @@ with tabs[-1]:
         green_count = int((df["band"] == "GREEN").sum())
         st.metric("Domains (R / A / G)", f"{red_count} / {amber_count} / {green_count}")
     with k3:
-        # Highest risk domain label
         top = df.iloc[0]
         st.metric("Top Risk Domain" if lang == "EN" else "Κορυφαίος Κίνδυνος", f"{top['domain']}")
 
@@ -434,10 +766,7 @@ with tabs[-1]:
         st.plotly_chart(make_radar(labels, values, UI[lang]["radar"]), use_container_width=True)
 
     with c2:
-        bar_df = pd.DataFrame({
-            "Domain": labels,
-            "Avg (1–5)": values,
-        })
+        bar_df = pd.DataFrame({"Domain": labels, "Avg (1–5)": values})
         fig = go.Figure(go.Bar(x=bar_df["Domain"], y=bar_df["Avg (1–5)"]))
         fig.update_layout(
             title=UI[lang]["bars"],
@@ -451,7 +780,7 @@ with tabs[-1]:
 
     st.divider()
 
-    # Risk map (heatmap-like table)
+    # Risk table
     st.subheader(UI[lang]["risk_matrix"])
     show = df.copy()
     show["Weight %"] = (show["weight"] * 100).round(0).astype(int)
@@ -465,13 +794,10 @@ with tabs[-1]:
 
     # Priorities
     st.subheader(UI[lang]["priority_title"])
-    top_n = 5
-    pri = df.head(top_n)
-
+    pri = df.head(5)
     for _, r in pri.iterrows():
-        dom_key = r["domain_key"]
         band = r["band"]
-        st.markdown(f"### {'🔴' if band=='RED' else '🟡' if band=='AMBER' else '🟢'} {DOMAIN_LABELS[lang][dom_key]}")
+        st.markdown(f"### {'🔴' if band=='RED' else '🟡' if band=='AMBER' else '🟢'} {r['domain']}")
         st.caption(f"Weight / Βάρος: {int(r['weight']*100)}% · Avg: {r['avg_score']:.2f} · {BAND_LABELS[lang][band]}")
         st.write(DOMAIN_INTERP[lang][band])
 
@@ -485,7 +811,7 @@ with tabs[-1]:
 
     st.divider()
 
-    # Download CSV
+    # Build answers dataframe for export
     out_rows = []
     for q in QUESTIONS:
         out_rows.append({
@@ -499,5 +825,41 @@ with tabs[-1]:
         })
     out = pd.DataFrame(out_rows)
 
-    csv = out.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(UI[lang]["download"], data=csv, file_name="legacy360_results.csv", mime="text/csv")
+    # CSV download
+    csv_bytes = out.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        UI[lang]["download_csv"],
+        data=csv_bytes,
+        file_name="legacy360_results.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+    # PDF download
+    pdf_bytes = build_pdf_report(
+        lang=lang,
+        df_domains=df,
+        overall_0_100=overall,
+        overall_band=overall_band,
+        answers_df=out,
+        legacy_logo_path=LEGACY_LOGO,
+        strategize_logo_path=STRATEGIZE_LOGO,
+    )
+
+    pdf_filename = "Legacy360_Report.pdf" if lang == "EN" else "Legacy360_Αναφορά.pdf"
+    st.download_button(
+        UI[lang]["download_pdf"],
+        data=pdf_bytes,
+        file_name=pdf_filename,
+        mime="application/pdf",
+        use_container_width=True
+    )
+
+    st.divider()
+
+    # Optional: restart assessment
+    if st.button("🔄 Νέα Αξιολόγηση / New Assessment", use_container_width=True):
+        st.session_state["answers"] = {q.id: None for q in QUESTIONS}
+        st.session_state["step"] = 0
+        st.session_state["submitted"] = False
+        st.rerun()
