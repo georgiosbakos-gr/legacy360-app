@@ -808,6 +808,52 @@ else:
     overall_band = band_for_score(float(np.mean(list(domain_scores.values()))))
     st.markdown(f"### {UI[lang]['overall_interp_title']}")
     st.write(OVERALL_INTERP[lang][overall_band])
+    # ---------------------------
+# Next actions & recommendations (commercial bridge)
+# ---------------------------
+NEXT_ACTIONS = {
+    "GR": {
+        "title": "Σύνοψη Επόμενων Ενεργειών & Προτάσεων",
+        "intro": ("Με βάση τα αποτελέσματα, προτείνονται τα ακόλουθα βήματα ώστε η επιχείρηση να μετατρέψει "
+                  "τη διάγνωση σε στοχευμένο σχέδιο βελτίωσης. Η Strategize μπορεί να αναλάβει τη δομή, "
+                  "τη διευκόλυνση και την υλοποίηση, αξιοποιώντας εμπειρία σε αντίστοιχα έργα εταιρικής και οικογενειακής διακυβέρνησης."),
+        "bullets": [
+            "Επιβεβαίωση ευρημάτων: σύντομο workshop 60–90’ με βασικούς decision makers (Owner(s), CEO, Board/Advisors).",
+            "Οριστικοποίηση προτεραιοτήτων: επιλογή 3–5 παρεμβάσεων υψηλής αξίας (high-weight domains / υψηλός κίνδυνος).",
+            "Καθορισμός governance framework: ρόλοι, αρμοδιότητες, escalation, decision rights και cadence συναντήσεων.",
+            "Σχέδιο διαδοχής & συνέχεια: επόμενα βήματα για succession readiness, risk controls και talent pipeline.",
+            "Μετρήσιμη εφαρμογή: KPIs, dashboard, milestones και μηχανισμός παρακολούθησης προόδου 8–12 εβδομάδων."
+        ],
+        "cta_title": "Πώς μπορεί να βοηθήσει η Strategize",
+        "cta_body": ("Η Strategize διαθέτει σημαντική εμπειρία σε έργα οικογενειακών επιχειρήσεων, "
+                     "διακυβέρνησης, στρατηγικής σαφήνειας και μετασχηματισμού. "
+                     "Μπορούμε να μετατρέψουμε τα αποτελέσματα σε decision-grade roadmap, "
+                     "με σαφή deliverables, χρονοδιάγραμμα και μηχανισμό εφαρμογής."),
+    },
+    "EN": {
+        "title": "Next Actions & Recommendations",
+        "intro": ("Based on the results, the following steps are recommended to convert diagnosis into a focused improvement plan. "
+                  "Strategize can structure, facilitate and support implementation, drawing on proven experience across governance, "
+                  "family business advisory and execution roadmaps."),
+        "bullets": [
+            "Validate findings: a 60–90’ workshop with key decision makers (Owner(s), CEO, Board/Advisors).",
+            "Confirm priorities: select 3–5 high-value interventions (high-weight domains / highest risk).",
+            "Define the governance framework: roles, decision rights, escalation, meeting cadence and accountability.",
+            "Succession & continuity: next steps for succession readiness, risk controls and talent pipeline.",
+            "Execution with metrics: KPIs, dashboard, milestones and an 8–12 week progress drumbeat."
+        ],
+        "cta_title": "How Strategize can help",
+        "cta_body": ("Strategize has extensive experience in family business governance, board effectiveness, strategy clarity and transformation execution. "
+                     "We can translate the assessment into a decision-grade roadmap with clear deliverables, timeline and execution governance."),
+    }
+}[lang]
+
+with st.expander("🚀 " + NEXT_ACTIONS["title"], expanded=True):
+    st.write(NEXT_ACTIONS["intro"])
+    for b in NEXT_ACTIONS["bullets"]:
+        st.markdown(f"- {b}")
+    st.markdown(f"**{NEXT_ACTIONS['cta_title']}**")
+    st.write(NEXT_ACTIONS["cta_body"])
 
     st.divider()
 
@@ -863,3 +909,4 @@ else:
         st.session_state["step"] = 0
         st.session_state["submitted"] = False
         st.rerun()
+
