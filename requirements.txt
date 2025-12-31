@@ -3,3 +3,6 @@ pandas
 numpy
 plotly
 reportlab
+supabase
+Pillow
+
