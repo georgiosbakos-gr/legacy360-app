@@ -1,41 +1,97 @@
 # legacy360_app.py
-# Legacy360° — Family Governance & Succession Roadmap (a Strategize service)
-# Streamlit wizard app with validation, progress, submit-lock, premium PDF export + commercial CTA
+# Legacy360° V1 — Participant Wizard + Admin Dashboard (Supabase, token invites, JSONB, aggregation, premium PDF)
 
 import os
+import json
+import hashlib
+import secrets
 from io import BytesIO
-from datetime import datetime
 from dataclasses import dataclass
-from typing import Dict, List
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Any
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+from supabase import create_client, Client
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
 from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+from reportlab.lib.utils import ImageReader
+
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 
-# =========================
-# Data model
-# =========================
+# =========================================================
+# CONFIG / SECRETS
+# =========================================================
+
+QUESTIONNAIRE_VERSION = "v1"
+
+def _get_secret(name: str, required: bool = True) -> str:
+    v = ""
+    try:
+        v = str(st.secrets.get(name, "")).strip()
+    except Exception:
+        v = ""
+    if not v:
+        v = os.getenv(name, "").strip()
+    if required and not v:
+        raise RuntimeError(f"Missing secret/env: {name}")
+    return v
+
+def supabase_client(use_service_role: bool = False) -> Client:
+    url = _get_secret("SUPABASE_URL")
+    key = _get_secret("SUPABASE_SERVICE_ROLE_KEY" if use_service_role else "SUPABASE_ANON_KEY")
+    return create_client(url, key)
+
+def sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+# =========================================================
+# PDF FONTS (Greek-safe)
+# =========================================================
+
+def register_pdf_fonts():
+    if getattr(register_pdf_fonts, "_done", False):
+        return
+
+    base = os.path.dirname(__file__)
+    font_dir = os.path.join(base, "assets", "fonts")
+    regular = os.path.join(font_dir, "DejaVuSans.ttf")
+    bold = os.path.join(font_dir, "DejaVuSans-Bold.ttf")
+
+    if not (os.path.exists(regular) and os.path.exists(bold)):
+        raise RuntimeError(
+            "Missing fonts. Add assets/fonts/DejaVuSans.ttf and assets/fonts/DejaVuSans-Bold.ttf"
+        )
+
+    pdfmetrics.registerFont(TTFont("DejaVu", regular))
+    pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
+    register_pdf_fonts._done = True
+
+
+# =========================================================
+# DOMAIN MODEL
+# =========================================================
 
 @dataclass
 class Domain:
     key: str
-    weight: float  # e.g., 0.20
-
+    weight: float
 
 @dataclass
 class Question:
     id: str
     domain_key: str
     text: Dict[str, str]  # {"GR": "...", "EN": "..."}
-
 
 DOMAINS: List[Domain] = [
     Domain("corp_gov", 0.20),
@@ -67,191 +123,105 @@ DOMAIN_LABELS = {
 
 QUESTIONS: List[Question] = [
     # Corporate Governance
-    Question("1.1", "corp_gov", {
-        "EN": "The roles and responsibilities of the Board, Management, and Shareholders are clearly defined and respected in practice.",
-        "GR": "Οι ρόλοι και οι αρμοδιότητες του Διοικητικού Συμβουλίου, της Διοίκησης και των Μετόχων είναι σαφώς καθορισμένοι και γίνονται σεβαστοί στην πράξη."
-    }),
-    Question("1.2", "corp_gov", {
-        "EN": "The Board provides effective strategic oversight and constructive challenge to management decisions.",
-        "GR": "Το Διοικητικό Συμβούλιο ασκεί ουσιαστικό στρατηγικό έλεγχο και ασκεί εποικοδομητική κριτική στις αποφάσεις της Διοίκησης."
-    }),
-    Question("1.3", "corp_gov", {
-        "EN": "Decision-making authority and escalation mechanisms are clearly defined and consistently applied.",
-        "GR": "Οι αρμοδιότητες λήψης αποφάσεων και οι μηχανισμοί κλιμάκωσης είναι σαφώς καθορισμένοι και εφαρμόζονται με συνέπεια."
-    }),
-    Question("1.4", "corp_gov", {
-        "EN": "Governance structures support accountability, transparency, and long-term value creation.",
-        "GR": "Οι δομές διακυβέρνησης υποστηρίζουν τη λογοδοσία, τη διαφάνεια και τη μακροπρόθεσμη δημιουργία αξίας."
-    }),
+    Question("1.1", "corp_gov", {"EN": "Roles and responsibilities of Board, Management and Shareholders are clearly defined and respected in practice.",
+                                "GR": "Οι ρόλοι και οι αρμοδιότητες του Δ.Σ., της Διοίκησης και των Μετόχων είναι σαφώς καθορισμένοι και γίνονται σεβαστοί στην πράξη."}),
+    Question("1.2", "corp_gov", {"EN": "The Board provides effective strategic oversight and constructive challenge.",
+                                "GR": "Το Δ.Σ. ασκεί ουσιαστικό στρατηγικό έλεγχο και εποικοδομητική κριτική."}),
+    Question("1.3", "corp_gov", {"EN": "Decision rights and escalation mechanisms are clear and consistently applied.",
+                                "GR": "Τα decision rights και οι μηχανισμοί κλιμάκωσης είναι σαφείς και εφαρμόζονται με συνέπεια."}),
+    Question("1.4", "corp_gov", {"EN": "Governance supports accountability, transparency and long-term value creation.",
+                                "GR": "Η διακυβέρνηση υποστηρίζει λογοδοσία, διαφάνεια και μακροπρόθεσμη δημιουργία αξίας."}),
 
     # Family Governance
-    Question("2.1", "family_gov", {
-        "EN": "The relationship between the family, ownership, and the business is clearly structured and formally governed.",
-        "GR": "Η σχέση μεταξύ Οικογένειας, Ιδιοκτησίας και Επιχείρησης είναι σαφώς δομημένη και διέπεται από τυπικούς κανόνες."
-    }),
-    Question("2.2", "family_gov", {
-        "EN": "There are established forums or processes for family communication, alignment, and conflict resolution.",
-        "GR": "Υπάρχουν θεσμοθετημένα όργανα ή διαδικασίες για την επικοινωνία, την ευθυγράμμιση και την επίλυση διαφορών εντός της οικογένειας."
-    }),
-    Question("2.3", "family_gov", {
-        "EN": "Family policies (e.g. employment, dividends, ownership transfers) are clearly defined and applied consistently.",
-        "GR": "Οι οικογενειακές πολιτικές (π.χ. απασχόληση, μερίσματα, μεταβίβαση ιδιοκτησίας) είναι σαφώς καθορισμένες και εφαρμόζονται με συνέπεια."
-    }),
-    Question("2.4", "family_gov", {
-        "EN": "Family involvement supports business continuity rather than creating operational or governance risk.",
-        "GR": "Η εμπλοκή της οικογένειας υποστηρίζει τη βιωσιμότητα της επιχείρησης και δεν δημιουργεί λειτουργικούς ή διακυβερνητικούς κινδύνους."
-    }),
+    Question("2.1", "family_gov", {"EN": "Family–Ownership–Business relationship is formally structured and governed.",
+                                  "GR": "Η σχέση Οικογένειας–Ιδιοκτησίας–Επιχείρησης είναι δομημένη και τυπικά ορισμένη."}),
+    Question("2.2", "family_gov", {"EN": "There are forums/processes for family alignment and conflict resolution.",
+                                  "GR": "Υπάρχουν διαδικασίες για ευθυγράμμιση και επίλυση συγκρούσεων εντός της οικογένειας."}),
+    Question("2.3", "family_gov", {"EN": "Family policies (employment/dividends/transfers) are defined and applied consistently.",
+                                  "GR": "Οι οικογενειακές πολιτικές (απασχόληση/μερίσματα/μεταβιβάσεις) είναι ορισμένες και εφαρμόζονται με συνέπεια."}),
+    Question("2.4", "family_gov", {"EN": "Family involvement supports continuity rather than creating governance risk.",
+                                  "GR": "Η εμπλοκή της οικογένειας υποστηρίζει τη συνέχεια και δεν δημιουργεί κίνδυνο διακυβέρνησης."}),
 
-    # Roles of family members
-    Question("3.1", "family_roles", {
-        "EN": "The roles and responsibilities of family members working in the business are clearly defined and documented.",
-        "GR": "Οι ρόλοι και οι αρμοδιότητες των μελών της οικογένειας που εργάζονται στην επιχείρηση είναι σαφώς καθορισμένοι και τεκμηριωμένοι."
-    }),
-    Question("3.2", "family_roles", {
-        "EN": "Entry, progression, and exit criteria for family members are based on objective and transparent principles.",
-        "GR": "Τα κριτήρια εισόδου, εξέλιξης και αποχώρησης των μελών της οικογένειας βασίζονται σε αντικειμενικές και διαφανείς αρχές."
-    }),
-    Question("3.3", "family_roles", {
-        "EN": "The performance of family members is evaluated using the same standards applied to non-family executives.",
-        "GR": "Η απόδοση των μελών της οικογένειας αξιολογείται με τα ίδια κριτήρια που εφαρμόζονται και στα μη οικογενειακά στελέχη."
-    }),
-    Question("3.4", "family_roles", {
-        "EN": "Family roles within the business add measurable value and do not rely on informal authority.",
-        "GR": "Οι ρόλοι των μελών της οικογένειας στην επιχείρηση προσθέτουν μετρήσιμη αξία και δεν βασίζονται σε άτυπη εξουσία."
-    }),
+    # Family roles
+    Question("3.1", "family_roles", {"EN": "Roles and responsibilities of family members in the business are documented.",
+                                    "GR": "Οι ρόλοι των μελών οικογένειας στην επιχείρηση είναι τεκμηριωμένοι."}),
+    Question("3.2", "family_roles", {"EN": "Entry/progression/exit criteria for family members are objective and transparent.",
+                                    "GR": "Τα κριτήρια εισόδου/εξέλιξης/εξόδου είναι αντικειμενικά και διαφανή."}),
+    Question("3.3", "family_roles", {"EN": "Performance evaluation uses the same standards as for non-family executives.",
+                                    "GR": "Η αξιολόγηση απόδοσης χρησιμοποιεί τα ίδια κριτήρια με τα μη οικογενειακά στελέχη."}),
+    Question("3.4", "family_roles", {"EN": "Family roles add measurable value and do not rely on informal authority.",
+                                    "GR": "Οι οικογενειακοί ρόλοι προσθέτουν μετρήσιμη αξία και δεν βασίζονται σε άτυπη εξουσία."}),
 
-    # Strategic Clarity
-    Question("4.1", "strategy", {
-        "EN": "The organisation has a clearly articulated strategy that is understood across leadership levels.",
-        "GR": "Ο οργανισμός διαθέτει σαφώς διατυπωμένη στρατηγική που είναι κατανοητή σε όλα τα επίπεδα ηγεσίας."
-    }),
-    Question("4.2", "strategy", {
-        "EN": "Strategic priorities are translated into clear objectives, initiatives, and execution plans.",
-        "GR": "Οι στρατηγικές προτεραιότητες μεταφράζονται σε σαφείς στόχους, πρωτοβουλίες και σχέδια υλοποίησης."
-    }),
-    Question("4.3", "strategy", {
-        "EN": "Strategic decision-making reflects agreed priorities rather than short-term or ad-hoc considerations.",
-        "GR": "Η λήψη στρατηγικών αποφάσεων αντανακλά συμφωνημένες προτεραιότητες και όχι βραχυπρόθεσμες ή αποσπασματικές επιλογές."
-    }),
-    Question("4.4", "strategy", {
-        "EN": "The strategy balances business performance with family expectations and long-term continuity.",
-        "GR": "Η στρατηγική εξισορροπεί την επιχειρησιακή απόδοση με τις προσδοκίες της οικογένειας και τη μακροπρόθεσμη συνέχεια."
-    }),
+    # Strategy
+    Question("4.1", "strategy", {"EN": "There is a clear strategy understood across leadership levels.",
+                                "GR": "Υπάρχει σαφής στρατηγική κατανοητή σε επίπεδα ηγεσίας."}),
+    Question("4.2", "strategy", {"EN": "Strategic priorities are translated into objectives, initiatives and execution plans.",
+                                "GR": "Οι προτεραιότητες μεταφράζονται σε στόχους, πρωτοβουλίες και σχέδια υλοποίησης."}),
+    Question("4.3", "strategy", {"EN": "Strategic decisions reflect agreed priorities, not ad-hoc considerations.",
+                                "GR": "Οι στρατηγικές αποφάσεις αντανακλούν συμφωνημένες προτεραιότητες, όχι αποσπασματικές επιλογές."}),
+    Question("4.4", "strategy", {"EN": "Strategy balances performance, family expectations and continuity.",
+                                "GR": "Η στρατηγική ισορροπεί απόδοση, προσδοκίες οικογένειας και συνέχεια."}),
 
     # Financial & performance visibility
-    Question("5.1", "fin_perf", {
-        "EN": "Financial and performance information is timely, reliable, and decision-relevant.",
-        "GR": "Η χρηματοοικονομική και επιχειρησιακή πληροφόρηση είναι έγκαιρη, αξιόπιστη και κατάλληλη για τη λήψη αποφάσεων."
-    }),
-    Question("5.2", "fin_perf", {
-        "EN": "Key performance indicators (KPIs) are clearly defined and aligned with strategic priorities.",
-        "GR": "Οι βασικοί δείκτες απόδοσης (KPIs) είναι σαφώς καθορισμένοι και ευθυγραμμισμένοι με τις στρατηγικές προτεραιότητες."
-    }),
-    Question("5.3", "fin_perf", {
-        "EN": "Performance discussions focus on insight and forward-looking actions, not only historical results.",
-        "GR": "Οι συζητήσεις απόδοσης εστιάζουν σε ουσιαστική ανάλυση και μελλοντικές ενέργειες, και όχι μόνο σε ιστορικά αποτελέσματα."
-    }),
-    Question("5.4", "fin_perf", {
-        "EN": "Transparency supports accountability at both management and ownership levels.",
-        "GR": "Η διαφάνεια υποστηρίζει τη λογοδοσία τόσο σε επίπεδο Διοίκησης όσο και Ιδιοκτησίας."
-    }),
+    Question("5.1", "fin_perf", {"EN": "Financial/performance info is timely, reliable and decision-relevant.",
+                                "GR": "Η πληροφόρηση απόδοσης είναι έγκαιρη, αξιόπιστη και χρήσιμη για αποφάσεις."}),
+    Question("5.2", "fin_perf", {"EN": "KPIs are clearly defined and aligned with strategic priorities.",
+                                "GR": "Τα KPIs είναι σαφώς ορισμένα και ευθυγραμμισμένα με στρατηγικές προτεραιότητες."}),
+    Question("5.3", "fin_perf", {"EN": "Performance discussions focus on insight and forward actions.",
+                                "GR": "Οι συζητήσεις απόδοσης εστιάζουν σε insights και μελλοντικές ενέργειες."}),
+    Question("5.4", "fin_perf", {"EN": "Transparency supports accountability in management and ownership.",
+                                "GR": "Η διαφάνεια υποστηρίζει λογοδοσία στη διοίκηση και την ιδιοκτησία."}),
 
     # Sustainability & continuity
-    Question("6.1", "sust_cont", {
-        "EN": "There is a clear and realistic succession approach for key leadership and ownership roles.",
-        "GR": "Υπάρχει σαφής και ρεαλιστική προσέγγιση διαδοχής για κρίσιμους ρόλους ηγεσίας και ιδιοκτησίας."
-    }),
-    Question("6.2", "sust_cont", {
-        "EN": "The organisation actively manages risks that could affect long-term business and family continuity.",
-        "GR": "Ο οργανισμός διαχειρίζεται ενεργά τους κινδύνους που θα μπορούσαν να επηρεάσουν τη μακροπρόθεσμη συνέχεια της επιχείρησης και της οικογένειας."
-    }),
-    Question("6.3", "sust_cont", {
-        "EN": "Leadership development and talent pipelines support future organisational needs.",
-        "GR": "Η ανάπτυξη ηγεσίας και η δεξαμενή ταλέντων υποστηρίζουν τις μελλοντικές ανάγκες του οργανισμού."
-    }),
-    Question("6.4", "sust_cont", {
-        "EN": "Sustainability considerations are integrated into strategic and governance decision-making.",
-        "GR": "Οι παράμετροι βιωσιμότητας ενσωματώνονται στη στρατηγική και στη λήψη αποφάσεων διακυβέρνησης."
-    }),
+    Question("6.1", "sust_cont", {"EN": "There is a realistic succession approach for key leadership and ownership roles.",
+                                 "GR": "Υπάρχει ρεαλιστική προσέγγιση διαδοχής για κρίσιμους ρόλους ηγεσίας και ιδιοκτησίας."}),
+    Question("6.2", "sust_cont", {"EN": "Long-term risks are actively identified and managed.",
+                                 "GR": "Οι μακροπρόθεσμοι κίνδυνοι εντοπίζονται και διαχειρίζονται ενεργά."}),
+    Question("6.3", "sust_cont", {"EN": "Leadership development and talent pipelines support future needs.",
+                                 "GR": "Η ανάπτυξη ηγεσίας και ταλέντων υποστηρίζει μελλοντικές ανάγκες."}),
+    Question("6.4", "sust_cont", {"EN": "Sustainability is integrated into strategic/governance decisions.",
+                                 "GR": "Η βιωσιμότητα ενσωματώνεται σε στρατηγικές/διακυβερνητικές αποφάσεις."}),
 ]
 
 
-# =========================
-# UI strings
-# =========================
+# =========================================================
+# UI COPY
+# =========================================================
 
 UI = {
     "GR": {
-        "app_title": "Legacy360° | Family Governance & Succession Roadmap",
+        "title": "Legacy360° | Family Governance & Succession Roadmap",
         "tagline": "a Strategize service",
-        "intro_title": "Αυτοαξιολόγηση (Self-completed)",
-        "intro_body": (
-            "Συμπληρώστε την αξιολόγηση με βάση την πραγματική κατάσταση. "
-            "Στο τέλος θα δείτε dashboard, προτεραιότητες και δυνατότητα εξαγωγής PDF/CSV."
-        ),
-        "scale_title": "Κλίμακα Ωριμότητας 1–5 (Ορισμοί)",
-        "scale": {
-            1: "Άτυπο / Αποσπασματικό: εξάρτηση από πρόσωπα, χωρίς σταθερή δομή ή τεκμηρίωση.",
-            2: "Μερικώς Ορισμένο: υπάρχουν πρακτικές αλλά ασυνέπεια/επιλεκτική εφαρμογή.",
-            3: "Ορισμένο αλλά όχι πλήρως ενσωματωμένο: δομές υπάρχουν, η εφαρμογή δεν είναι σταθερή.",
-            4: "Ενσωματωμένο & αποτελεσματικό: σαφές, συνεπές, υποστηρίζει ποιοτικές αποφάσεις.",
-            5: "Προηγμένο / Πρότυπο: πλήρως ενσωματωμένο, με συστηματική αναθεώρηση και υψηλή ωριμότητα."
-        },
-        "question_help": "Επιλέξτε βαθμό 1–5 για να συνεχίσετε.",
+        "missing_token": "Λείπει ή είναι άκυρο το invite token. Παρακαλώ χρησιμοποιήστε το link που λάβατε.",
+        "token_invalid": "Το invite token δεν είναι έγκυρο/έχει λήξει/έχει χρησιμοποιηθεί.",
+        "profile": "Στοιχεία Συμμετέχοντα",
+        "case": "Case ID",
+        "progress": "Πρόοδος",
+        "submit": "✅ Υποβολή / Submit",
+        "submitted_ok": "Η υποβολή καταχωρήθηκε επιτυχώς.",
         "results": "Αποτελέσματα",
-        "overall_index": "Συνολικός Δείκτης Ωριμότητας (0–100)",
-        "priority_title": "Κορυφαίες Προτεραιότητες (Top Focus Areas)",
-        "download_csv": "Λήψη CSV",
         "download_pdf": "Λήψη PDF",
-        "incomplete_all": "Υπάρχουν ερωτήσεις χωρίς απάντηση. Παρακαλώ συμπληρώστε όλες τις ερωτήσεις.",
-        "interpretations": "Ερμηνεία & Επιπτώσεις Συζήτησης",
-        "overall_interp_title": "Συνοπτική Ερμηνεία",
-        "risk_matrix": "Χάρτης Συγκέντρωσης Κινδύνου (Score × Weight)",
-        "radar": "Radar Ωριμότητας",
-        "bars": "Ανά Ενότητα (Μέσος Όρος 1–5)",
-        "submit_info": "Πατήστε Υποβολή για να κλειδώσετε τα αποτελέσματα.",
-        "submit_btn": "✅ Υποβολή / Submit",
-        "back_btn": "⬅️ Προηγούμενο / Previous",
-        "next_btn": "Επόμενη Ενότητα / Next Section ➡️",
-        "see_results_btn": "Δες τα Αποτελέσματα / See Results 📊",
-        "missing_count": "Απομένουν {n} ερωτήσεις χωρίς απάντηση σε αυτή την ενότητα.",
-        "cta_expander_title": "Σύνοψη Επόμενων Ενεργειών & Προτάσεων",
+        "download_case_pdf": "Λήψη Case PDF (Alignment)",
+        "admin": "Admin",
+        "admin_password": "Κωδικός",
+        "admin_wrong": "Λάθος κωδικός.",
     },
     "EN": {
-        "app_title": "Legacy360° | Family Governance & Succession Roadmap",
+        "title": "Legacy360° | Family Governance & Succession Roadmap",
         "tagline": "a Strategize service",
-        "intro_title": "Self-completed assessment",
-        "intro_body": (
-            "Complete the assessment based on current reality. "
-            "At the end you will receive a dashboard with priorities and PDF/CSV export."
-        ),
-        "scale_title": "Maturity Scale 1–5 (Anchors)",
-        "scale": {
-            1: "Informal / ad-hoc: person-dependent, no consistent structure or documentation.",
-            2: "Partially defined: some practices exist but inconsistent / selectively applied.",
-            3: "Defined but not embedded: structures exist; adoption and compliance vary.",
-            4: "Embedded & effective: clearly defined and consistently applied; supports decision quality.",
-            5: "Advanced / role model: fully embedded, continuously reviewed; maturity beyond peers."
-        },
-        "question_help": "Select a score 1–5 to continue.",
+        "missing_token": "Missing or invalid invite token. Please use the link you received.",
+        "token_invalid": "Invite token is invalid/expired/used.",
+        "profile": "Participant Profile",
+        "case": "Case ID",
+        "progress": "Progress",
+        "submit": "✅ Submit",
+        "submitted_ok": "Submission stored successfully.",
         "results": "Results",
-        "overall_index": "Overall Maturity Index (0–100)",
-        "priority_title": "Top Focus Areas",
-        "download_csv": "Download CSV",
         "download_pdf": "Download PDF",
-        "incomplete_all": "Some questions are unanswered. Please complete all questions.",
-        "interpretations": "Interpretation & Discussion Implications",
-        "overall_interp_title": "Executive Summary Interpretation",
-        "risk_matrix": "Risk Concentration Map (Score × Weight)",
-        "radar": "Maturity Radar",
-        "bars": "By Domain (Average 1–5)",
-        "submit_info": "Press Submit to lock results.",
-        "submit_btn": "✅ Submit",
-        "back_btn": "⬅️ Previous",
-        "next_btn": "Next Section ➡️",
-        "see_results_btn": "See Results 📊",
-        "missing_count": "{n} questions remain unanswered in this section.",
-        "cta_expander_title": "Next Actions & Recommendations",
+        "download_case_pdf": "Download Case PDF (Alignment)",
+        "admin": "Admin",
+        "admin_password": "Password",
+        "admin_wrong": "Wrong password.",
     }
 }
 
@@ -268,84 +238,27 @@ BAND_LABELS = {
 
 DOMAIN_INTERP = {
     "GR": {
-        "RED": "Υπάρχουν ουσιαστικά κενά δομής/εφαρμογής. Ο κίνδυνος κλιμάκωσης (σύγκρουση, καθυστερήσεις, ασυνέπεια αποφάσεων) είναι αυξημένος.",
-        "AMBER": "Το πλαίσιο είναι μερικώς ορισμένο αλλά όχι πλήρως ενσωματωμένο. Απαιτείται τυποποίηση, σαφήνεια ρόλων/κανόνων και πειθαρχία εφαρμογής.",
-        "GREEN": "Η πρακτική είναι ενσωματωμένη και λειτουργεί αποτελεσματικά. Προτείνεται συστηματική αναθεώρηση και ενίσχυση όπου χρειάζεται.",
+        "RED": "Υπάρχουν ουσιαστικά κενά δομής/εφαρμογής. Ο κίνδυνος κλιμάκωσης είναι αυξημένος.",
+        "AMBER": "Μερικώς ορισμένο πλαίσιο. Απαιτείται τυποποίηση και πειθαρχία εφαρμογής.",
+        "GREEN": "Ενσωματωμένο και αποτελεσματικό. Συνιστάται περιοδική αναθεώρηση.",
     },
     "EN": {
-        "RED": "Material structural and adoption gaps exist. Escalation risk (conflict, delays, inconsistent decisions) is elevated.",
-        "AMBER": "The framework is partially defined but not fully embedded. Standardisation, role clarity and disciplined application are required.",
-        "GREEN": "Practices are embedded and effective. Maintain with periodic review and targeted enhancements.",
-    }
-}
-
-OVERALL_INTERP = {
-    "GR": {
-        "RED": "Το συνολικό προφίλ ωριμότητας υποδηλώνει υψηλό διακυβερνητικό και εκτελεστικό κίνδυνο. Συνιστάται άμεση εστίαση στα κρίσιμα πεδία πριν από μεγάλες δεσμεύσεις (επενδύσεις, διαδοχή, ανάπτυξη).",
-        "AMBER": "Υπάρχει λειτουργική βάση, αλλά η ωριμότητα δεν είναι ακόμη συστηματικά ενσωματωμένη. Με στοχευμένες παρεμβάσεις σε υψηλού βάρους ενότητες, μειώνεται σημαντικά ο κίνδυνος και ενισχύεται η συνέχεια.",
-        "GREEN": "Το προφίλ δείχνει ισχυρή ωριμότητα. Προτεραιότητα: διατήρηση πειθαρχίας, περιοδικές αναθεωρήσεις και προληπτική προετοιμασία διαδοχής/συνέχειας.",
-    },
-    "EN": {
-        "RED": "The overall maturity profile indicates elevated governance and execution risk. Prioritise critical areas before major commitments (investments, succession moves, expansion).",
-        "AMBER": "A functional base exists, but maturity is not yet consistently embedded. Targeted interventions in high-weight domains can materially reduce risk and strengthen continuity.",
-        "GREEN": "The profile indicates strong maturity. Maintain discipline, run periodic reviews and proactively prepare succession/continuity.",
-    }
-}
-
-# Commercial bridge (used in App + PDF)
-NEXT_ACTIONS = {
-    "GR": {
-        "title": "Σύνοψη Επόμενων Ενεργειών & Προτάσεων",
-        "intro": (
-            "Με βάση τα αποτελέσματα, προτείνονται τα ακόλουθα βήματα ώστε η επιχείρηση να μετατρέψει "
-            "τη διάγνωση σε στοχευμένο σχέδιο βελτίωσης."
-        ),
-        "bullets": [
-            "Επιβεβαίωση ευρημάτων: workshop 60–90’ με βασικούς decision makers (Owner(s), CEO, Board/Advisors).",
-            "Οριστικοποίηση προτεραιοτήτων: επιλογή 3–5 παρεμβάσεων υψηλής αξίας (high-weight domains / υψηλός κίνδυνος).",
-            "Ορισμός governance framework: ρόλοι, αρμοδιότητες, escalation, decision rights και cadence συναντήσεων.",
-            "Διαδοχή & συνέχεια: επόμενα βήματα για succession readiness, risk controls και talent pipeline.",
-            "Μετρήσιμη εφαρμογή: KPIs, milestones και μηχανισμός παρακολούθησης προόδου 8–12 εβδομάδων."
-        ],
-        "cta_title": "Πώς μπορεί να βοηθήσει η Strategize",
-        "cta_body": (
-            "Η Strategize διαθέτει σημαντική εμπειρία σε έργα οικογενειακών επιχειρήσεων, "
-            "διακυβέρνησης, στρατηγικής σαφήνειας και μετασχηματισμού. Μπορούμε να μετατρέψουμε τα αποτελέσματα "
-            "σε decision-grade roadmap με σαφή deliverables, χρονοδιάγραμμα και μηχανισμό εφαρμογής."
-        ),
-        "cta_button": "Ζητήστε σύντομη συζήτηση 20’",
-        "cta_email": "gbakos@strategize.gr",
-        "cta_site": "https://strategize.gr",
-        "cta_note": "Απάντηση με το PDF ή ένα screenshot των αποτελεσμάτων αρκεί για να ξεκινήσουμε.",
-    },
-    "EN": {
-        "title": "Next Actions & Recommendations",
-        "intro": (
-            "Based on the results, the following steps are recommended to convert diagnosis into a focused improvement plan."
-        ),
-        "bullets": [
-            "Validate findings: a 60–90’ workshop with key decision makers (Owner(s), CEO, Board/Advisors).",
-            "Confirm priorities: select 3–5 high-value interventions (high-weight domains / highest risk).",
-            "Define governance framework: roles, decision rights, escalation, meeting cadence and accountability.",
-            "Succession & continuity: next steps for succession readiness, risk controls and talent pipeline.",
-            "Execution with metrics: KPIs, milestones and an 8–12 week progress drumbeat."
-        ],
-        "cta_title": "How Strategize can help",
-        "cta_body": (
-            "Strategize has extensive experience in family business governance, board effectiveness, strategy clarity and transformation execution. "
-            "We can translate the assessment into a decision-grade roadmap with clear deliverables, timeline and execution governance."
-        ),
-        "cta_button": "Request a 20’ review call",
-        "cta_email": "gbakos@strategize.gr",
-        "cta_site": "https://strategize.gr",
-        "cta_note": "Reply with the PDF report (or a screenshot of results) and we can start.",
+        "RED": "Material gaps exist. Escalation risk is elevated.",
+        "AMBER": "Partially defined; standardisation and disciplined adoption are required.",
+        "GREEN": "Embedded and effective; maintain via periodic review.",
     }
 }
 
 
-# =========================
-# Scoring & charts
-# =========================
+# =========================================================
+# HELPERS: SCORING / AGGREGATION
+# =========================================================
+
+def domain_questions_map() -> Dict[str, List[str]]:
+    m = {d.key: [] for d in DOMAINS}
+    for q in QUESTIONS:
+        m[q.domain_key].append(q.id)
+    return m
 
 def band_for_score(score: float) -> str:
     for b, lo, hi in BANDS:
@@ -353,22 +266,93 @@ def band_for_score(score: float) -> str:
             return b
     return "AMBER"
 
+def compute_domain_scores(answers: Dict[str, int]) -> Dict[str, float]:
+    dq = domain_questions_map()
+    scores = {}
+    for dom, qids in dq.items():
+        vals = [answers.get(qid) for qid in qids]
+        if any(v is None for v in vals):
+            scores[dom] = float("nan")
+        else:
+            scores[dom] = float(np.mean(vals))
+    return scores
 
 def weighted_index(domain_scores: Dict[str, float]) -> float:
     total = 0.0
     for d in DOMAINS:
-        s = domain_scores.get(d.key, np.nan)
+        s = domain_scores.get(d.key, float("nan"))
         if np.isnan(s):
-            return np.nan
+            return float("nan")
         total += s * d.weight
-    # Convert 1–5 to 0–100: 1 => 0, 5 => 100
-    return (total - 1.0) / 4.0 * 100.0
-
+    return (total - 1.0) / 4.0 * 100.0  # 1..5 -> 0..100
 
 def risk_priority(avg_score: float, weight: float) -> float:
-    # Higher risk when score is low and weight is high
     return (6.0 - avg_score) * weight
 
+def build_domain_df(lang: str, domain_scores: Dict[str, float]) -> pd.DataFrame:
+    rows = []
+    for d in DOMAINS:
+        avg = domain_scores[d.key]
+        rows.append({
+            "domain_key": d.key,
+            "domain": DOMAIN_LABELS[lang][d.key],
+            "weight": d.weight,
+            "avg_score": float(avg),
+            "band": band_for_score(float(avg)),
+            "risk": risk_priority(float(avg), d.weight),
+        })
+    return pd.DataFrame(rows).sort_values("risk", ascending=False)
+
+def aggregate_case(lang: str, submissions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    domains = [d.key for d in DOMAINS]
+    dom_vals = {k: [] for k in domains}
+    overall_vals = []
+
+    for s in submissions:
+        dj = s.get("derived_json") or {}
+        if isinstance(dj, str):
+            try:
+                dj = json.loads(dj)
+            except Exception:
+                dj = {}
+        ds = dj.get("domain_scores") or {}
+        for k in domains:
+            v = ds.get(k)
+            if v is None:
+                continue
+            try:
+                dom_vals[k].append(float(v))
+            except Exception:
+                pass
+        if dj.get("overall") is not None:
+            try:
+                overall_vals.append(float(dj["overall"]))
+            except Exception:
+                pass
+
+    dom_avg = {k: (float(np.mean(dom_vals[k])) if dom_vals[k] else float("nan")) for k in domains}
+    dom_std = {k: (float(np.std(dom_vals[k], ddof=0)) if len(dom_vals[k]) >= 2 else 0.0) for k in domains}
+    overall_avg = float(np.mean(overall_vals)) if overall_vals else float("nan")
+
+    gaps = [{"domain_key": k, "avg": dom_avg[k], "std": dom_std[k]} for k in domains if dom_std[k] >= 0.8]
+    gaps.sort(key=lambda x: x["std"], reverse=True)
+
+    case_df = build_domain_df(lang, dom_avg)
+    case_df["std"] = case_df["domain_key"].map(dom_std)
+
+    return {
+        "participants_n": len(submissions),
+        "domain_avg": dom_avg,
+        "domain_std": dom_std,
+        "overall_avg": overall_avg,
+        "consensus_gaps": gaps,
+        "case_df": case_df,
+    }
+
+
+# =========================================================
+# CHARTS
+# =========================================================
 
 def make_radar(labels: List[str], values: List[float], title: str):
     r = values + [values[0]]
@@ -385,649 +369,637 @@ def make_radar(labels: List[str], values: List[float], title: str):
     return fig
 
 
-# =========================
-# PDF export (Premium cover + footer + CTA)
-# =========================
+# =========================================================
+# PDF HELPERS (logos + wrapping)
+# =========================================================
 
-def build_pdf_report(
-    lang: str,
-    df_domains: pd.DataFrame,
-    overall_0_100: float,
-    overall_band: str,
-    answers_df: pd.DataFrame,
-    legacy_logo_path: str,
-    strategize_logo_path: str,
-) -> bytes:
+def _img_keep_aspect(path: str, width_mm: float):
+    try:
+        if path and os.path.exists(path):
+            ir = ImageReader(path)
+            iw, ih = ir.getSize()
+            aspect = ih / float(iw)
+            w = width_mm * mm
+            h = (width_mm * aspect) * mm
+            return Image(path, width=w, height=h)
+    except Exception:
+        return None
+    return None
+
+def _p(text: str, style: ParagraphStyle) -> Paragraph:
+    return Paragraph(text.replace("\n", "<br/>"), style)
+
+
+def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: float,
+                          answers_df: pd.DataFrame, legacy_logo_path: str, strategize_logo_path: str) -> bytes:
+    register_pdf_fonts()
+
     buf = BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm
-    )
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm, topMargin=16*mm, bottomMargin=16*mm)
 
     styles = getSampleStyleSheet()
     navy = colors.HexColor("#0B2C5D")
     gold = colors.HexColor("#C7922B")
     grey = colors.HexColor("#6B7280")
 
-    base = ParagraphStyle("base", parent=styles["BodyText"], fontName="Helvetica", fontSize=10, leading=13)
-    small = ParagraphStyle("small", parent=base, fontSize=9, leading=12, textColor=grey)
-    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=18, leading=22, textColor=navy, spaceAfter=8)
-    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=14, textColor=navy, spaceAfter=6)
-    h3 = ParagraphStyle("h3", parent=styles["Heading3"], fontName="Helvetica-Bold", fontSize=11, leading=13, textColor=navy, spaceAfter=4)
+    base = ParagraphStyle("base", parent=styles["BodyText"], fontName="DejaVu", fontSize=10, leading=13)
+    small = ParagraphStyle("small", parent=base, fontName="DejaVu", fontSize=9, leading=12, textColor=grey)
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="DejaVu-Bold", fontSize=18, leading=22, textColor=navy, spaceAfter=8)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="DejaVu-Bold", fontSize=12, leading=14, textColor=navy, spaceAfter=6)
 
     L = {
-        "GR": {
-            "cover_title": "Legacy360°",
-            "cover_subtitle": "Family Governance & Succession Roadmap",
-            "cover_tagline": "a Strategize service",
-            "report_title": "Αναφορά Αποτελεσμάτων",
-            "date": "Ημερομηνία",
-            "confidential": "ΕΜΠΙΣΤΕΥΤΙΚΟ / CONFIDENTIAL",
-            "overall": "Συνολικός Δείκτης Ωριμότητας (0–100)",
-            "summary": "Σύνοψη ανά Ενότητα",
-            "domain": "Ενότητα",
-            "weight": "Βάρος",
-            "score": "Βαθμός (1–5)",
-            "status": "Κατάσταση",
-            "risk": "Κίνδυνος",
-            "priorities": "Κορυφαίες Προτεραιότητες (Top Focus Areas)",
-            "appendix": "Παράρτημα: Απαντήσεις",
-            "question": "Ερώτηση",
-            "page": "Σελίδα",
-            "next_actions": "Σύνοψη Επόμενων Ενεργειών & Προτάσεων",
-            "how_help": "Πώς μπορεί να βοηθήσει η Strategize",
-            "contact": "Επικοινωνία",
-        },
-        "EN": {
-            "cover_title": "Legacy360°",
-            "cover_subtitle": "Family Governance & Succession Roadmap",
-            "cover_tagline": "a Strategize service",
-            "report_title": "Results Report",
-            "date": "Date",
-            "confidential": "CONFIDENTIAL",
-            "overall": "Overall Maturity Index (0–100)",
-            "summary": "Domain Summary",
-            "domain": "Domain",
-            "weight": "Weight",
-            "score": "Score (1–5)",
-            "status": "Status",
-            "risk": "Risk",
-            "priorities": "Top Focus Areas",
-            "appendix": "Appendix: Responses",
-            "question": "Question",
-            "page": "Page",
-            "next_actions": "Next Actions & Recommendations",
-            "how_help": "How Strategize can help",
-            "contact": "Contact",
-        }
+        "GR": {"report": "Αναφορά Αποτελεσμάτων", "date": "Ημερομηνία", "page": "Σελίδα",
+               "summary": "Σύνοψη ανά Ενότητα", "domain": "Ενότητα", "weight": "Βάρος", "score": "Βαθμός",
+               "status": "Κατάσταση", "risk": "Κίνδυνος", "appendix": "Παράρτημα: Απαντήσεις"},
+        "EN": {"report": "Results Report", "date": "Date", "page": "Page",
+               "summary": "Domain Summary", "domain": "Domain", "weight": "Weight", "score": "Score",
+               "status": "Status", "risk": "Risk", "appendix": "Appendix: Responses"},
     }[lang]
 
-    today = datetime.now().strftime("%d/%m/%Y")
-
-    def try_image(path: str, width_mm: float):
-        try:
-            if path and os.path.exists(path):
-                img = Image(path, width=width_mm * mm, height=width_mm * mm * 0.38)
-                return img
-        except Exception:
-            pass
-        return None
-
-    legacy_img = try_image(legacy_logo_path, 65)
-    strat_img = try_image(strategize_logo_path, 58)
-
-    def _footer(canvas, doc_):
+    def footer(canvas, doc_):
         canvas.saveState()
-        w, _h = A4
+        w, _ = A4
         canvas.setStrokeColor(gold)
         canvas.setLineWidth(1)
-        canvas.line(doc_.leftMargin, 14 * mm, w - doc_.rightMargin, 14 * mm)
-
-        canvas.setFont("Helvetica", 8)
+        canvas.line(doc_.leftMargin, 14*mm, w-doc_.rightMargin, 14*mm)
+        canvas.setFont("DejaVu", 8)
         canvas.setFillColor(grey)
-        canvas.drawString(doc_.leftMargin, 9.5 * mm, "Strategize — Beyond the Bottom Line")
-        canvas.drawRightString(w - doc_.rightMargin, 9.5 * mm, f"{L['page']} {canvas.getPageNumber()}")
+        canvas.drawString(doc_.leftMargin, 9.5*mm, "Strategize — Beyond the Bottom Line")
+        canvas.drawRightString(w-doc_.rightMargin, 9.5*mm, f"{L['page']} {canvas.getPageNumber()}")
         canvas.restoreState()
 
-    story: List = []
+    legacy_img = _img_keep_aspect(legacy_logo_path, 70)
+    strat_img = _img_keep_aspect(strategize_logo_path, 55)
 
-    # -------------------------
-    # COVER PAGE
-    # -------------------------
-    top_tbl = Table([[legacy_img if legacy_img else "", strat_img if strat_img else ""]],
-                    colWidths=[120 * mm, 55 * mm])
-    top_tbl.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    story = []
+
+    # Cover
+    top = Table([[legacy_img or "", strat_img or ""]], colWidths=[120*mm, 55*mm])
+    top.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("ALIGN",(1,0),(1,0),"RIGHT"),
+        ("LEFTPADDING",(0,0),(-1,-1),0),
+        ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING",(0,0),(-1,-1),0),
+        ("BOTTOMPADDING",(0,0),(-1,-1),0),
     ]))
-    story.append(top_tbl)
-    story.append(Spacer(1, 18))
-
-    story.append(Paragraph(L["cover_title"], ParagraphStyle("coverTitle", parent=h1, fontSize=26, leading=30)))
-    story.append(Paragraph(L["cover_subtitle"], ParagraphStyle("coverSub", parent=h2, fontSize=14, leading=18, textColor=navy)))
+    story.append(top)
+    story.append(Spacer(1, 16))
+    story.append(_p("<b>Legacy360°</b>", ParagraphStyle("ct", parent=h1, fontSize=24, leading=28)))
+    story.append(_p("Family Governance & Succession Roadmap", ParagraphStyle("cs", parent=h2, fontSize=13, leading=16)))
     story.append(Spacer(1, 6))
-    story.append(Paragraph(f"<font color='{gold.hexval()}'>{L['cover_tagline']}</font>", small))
-    story.append(Spacer(1, 18))
-
-    story.append(Table([[""]], colWidths=[175 * mm], style=TableStyle([("LINEBELOW", (0, 0), (-1, -1), 1.2, gold)])))
-    story.append(Spacer(1, 18))
-
-    meta_tbl = Table(
-        [[Paragraph(f"<b>{L['report_title']}</b>", h2), ""],
-         [Paragraph(f"{L['date']}: {today}", base),
-          Paragraph(L["confidential"], ParagraphStyle("conf", parent=base, textColor=gold, fontName="Helvetica-Bold"))]],
-        colWidths=[120 * mm, 55 * mm]
-    )
-    meta_tbl.setStyle(TableStyle([
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ("ALIGN", (1, 1), (1, 1), "RIGHT"),
-    ]))
-    story.append(meta_tbl)
-
-    story.append(Spacer(1, 240))
-    story.append(Paragraph("© Strategize", small))
+    story.append(_p(f"<font color='{gold.hexval()}'>a Strategize service</font>", small))
+    story.append(Spacer(1, 16))
+    story.append(Table([[""]], colWidths=[175*mm], style=TableStyle([("LINEBELOW",(0,0),(-1,-1),1.2,gold)])))
+    story.append(Spacer(1, 14))
+    story.append(_p(f"<b>{L['report']}</b>", h2))
+    story.append(_p(f"{L['date']}: {datetime.now().strftime('%d/%m/%Y')}", base))
     story.append(PageBreak())
 
-    # -------------------------
-    # MAIN CONTENT
-    # -------------------------
-    story.append(Paragraph(L["overall"], h2))
-    story.append(Paragraph(
-        f"<font color='{navy.hexval()}'><b>{overall_0_100:.1f}</b></font>",
-        ParagraphStyle("bigNumber", parent=h1, fontSize=22, leading=26)
-    ))
-    story.append(Paragraph(OVERALL_INTERP[lang][overall_band], base))
-    story.append(Spacer(1, 12))
-
-    # Next actions + Strategize CTA (in PDF)
-    na = NEXT_ACTIONS[lang]
-    story.append(Paragraph(L["next_actions"], h2))
-    story.append(Paragraph(na["intro"], base))
-    story.append(Spacer(1, 6))
-    for b in na["bullets"]:
-        story.append(Paragraph(f"• {b}", base))
-    story.append(Spacer(1, 8))
-    story.append(Paragraph(L["how_help"], h3))
-    story.append(Paragraph(na["cta_body"], base))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph(f"<b>{L['contact']}:</b> {na['cta_email']}  |  {na['cta_site']}", base))
-    story.append(Paragraph(na["cta_note"], small))
-    story.append(Spacer(1, 14))
-
-    # Domain summary table
-    story.append(Paragraph(L["summary"], h2))
+    # Domain Summary table (wrapped)
+    story.append(_p(L["summary"], h2))
 
     dd = df_domains.copy()
-    dd["Weight%"] = (dd["weight"] * 100).round(0).astype(int)
+    dd["Weight%"] = (dd["weight"]*100).round(0).astype(int)
     dd["Avg"] = dd["avg_score"].round(2)
     dd["Risk"] = dd["risk"].round(3)
 
-    table_data = [[L["domain"], L["weight"], L["score"], L["status"], L["risk"]]]
+    header_row = [L["domain"], L["weight"], L["score"], L["status"], L["risk"]]
+    rows = [header_row]
+
     for _, r in dd.sort_values("risk", ascending=False).iterrows():
-        table_data.append([
-            r["domain"],
-            f"{int(r['Weight%'])}%",
-            f"{r['Avg']:.2f}",
-            BAND_LABELS[lang][r["band"]],
-            f"{r['Risk']:.3f}",
+        rows.append([
+            _p(r["domain"], ParagraphStyle("td", parent=base, fontSize=9, leading=11)),
+            _p(f"{int(r['Weight%'])}%", ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
+            _p(f"{r['Avg']:.2f}", ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
+            _p(BAND_LABELS[lang][r["band"]], ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
+            _p(f"{r['Risk']:.3f}", ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
         ])
 
-    dom_tbl = Table(table_data, colWidths=[78 * mm, 18 * mm, 22 * mm, 30 * mm, 22 * mm])
+    # safer column widths to avoid overflow
+    dom_tbl = Table(rows, colWidths=[90*mm, 18*mm, 18*mm, 28*mm, 21*mm], repeatRows=1)
     dom_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), navy),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 10),
-        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.lightgrey),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("BACKGROUND",(0,0),(-1,0),navy),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"DejaVu-Bold"),
+        ("FONTSIZE",(0,0),(-1,0),9),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("ALIGN",(1,1),(-1,-1),"CENTER"),
+        ("GRID",(0,0),(-1,-1),0.3,colors.lightgrey),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.white]),
+        ("LEFTPADDING",(0,0),(-1,-1),4),
+        ("RIGHTPADDING",(0,0),(-1,-1),4),
+        ("TOPPADDING",(0,0),(-1,-1),3),
+        ("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]))
     story.append(dom_tbl)
     story.append(Spacer(1, 12))
 
-    # Priorities
-    story.append(Paragraph(L["priorities"], h2))
-    top5 = dd.sort_values("risk", ascending=False).head(5)
-    for i, r in enumerate(top5.to_dict(orient="records"), start=1):
-        story.append(Paragraph(
-            f"<b>{i}. {r['domain']}</b> — {L['score']}: {r['Avg']:.2f} · {L['weight']}: {int(r['Weight%'])}% · {L['status']}: {BAND_LABELS[lang][r['band']]}",
-            base
-        ))
-        story.append(Paragraph(DOMAIN_INTERP[lang][r["band"]], small))
-        story.append(Spacer(1, 4))
-
+    # Appendix table (wrapped)
     story.append(PageBreak())
-
-    # Appendix
-    story.append(Paragraph(L["appendix"], h2))
+    story.append(_p(L["appendix"], h2))
 
     a = answers_df.copy()
     a["domain"] = a["domain_gr"] if lang == "GR" else a["domain_en"]
     a["question"] = a["question_gr"] if lang == "GR" else a["question_en"]
 
-    qa_data = [["ID", L["domain"], L["question"], L["score"]]]
+    qa_rows = [["ID", L["domain"], "Question", "Score"]]
     for _, rr in a.iterrows():
-        qa_data.append([rr["question_id"], rr["domain"], rr["question"], str(rr["score"])])
+        qa_rows.append([
+            _p(str(rr["question_id"]), ParagraphStyle("qaid", parent=base, fontSize=8, leading=10)),
+            _p(str(rr["domain"]), ParagraphStyle("qad", parent=base, fontSize=8, leading=10)),
+            _p(str(rr["question"]), ParagraphStyle("qaq", parent=base, fontSize=8, leading=10)),
+            _p(str(rr["score"]), ParagraphStyle("qas", parent=base, fontSize=8, leading=10)),
+        ])
 
-    qa_tbl = Table(qa_data, colWidths=[12 * mm, 40 * mm, 105 * mm, 15 * mm], repeatRows=1)
+    qa_tbl = Table(qa_rows, colWidths=[14*mm, 42*mm, 100*mm, 15*mm], repeatRows=1)
     qa_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), navy),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 9),
-        ("FONTSIZE", (0, 1), (-1, -1), 8),
-        ("ALIGN", (0, 0), (0, -1), "CENTER"),
-        ("ALIGN", (-1, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("GRID", (0, 0), (-1, -1), 0.3, colors.lightgrey),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("BACKGROUND",(0,0),(-1,0),navy),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"DejaVu-Bold"),
+        ("FONTSIZE",(0,0),(-1,0),9),
+        ("GRID",(0,0),(-1,-1),0.25,colors.lightgrey),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.white]),
+        ("LEFTPADDING",(0,0),(-1,-1),4),
+        ("RIGHTPADDING",(0,0),(-1,-1),4),
+        ("TOPPADDING",(0,0),(-1,-1),3),
+        ("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]))
     story.append(qa_tbl)
 
-    # Apply footer on all pages after cover (i.e., from page 2 onwards)
-    def on_first_page(canvas, doc_):
-        _footer(canvas, doc_)
-
-    def on_later_pages(canvas, doc_):
-        _footer(canvas, doc_)
-
-    doc.build(story, onFirstPage=on_first_page, onLaterPages=on_later_pages)
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
     pdf_bytes = buf.getvalue()
     buf.close()
     return pdf_bytes
 
 
-# =========================
-# App setup
-# =========================
+def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
+                   legacy_logo_path: str, strategize_logo_path: str) -> bytes:
+    register_pdf_fonts()
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm, topMargin=16*mm, bottomMargin=16*mm)
+
+    styles = getSampleStyleSheet()
+    navy = colors.HexColor("#0B2C5D")
+    gold = colors.HexColor("#C7922B")
+    grey = colors.HexColor("#6B7280")
+
+    base = ParagraphStyle("base", parent=styles["BodyText"], fontName="DejaVu", fontSize=10, leading=13)
+    small = ParagraphStyle("small", parent=base, fontName="DejaVu", fontSize=9, leading=12, textColor=grey)
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="DejaVu-Bold", fontSize=18, leading=22, textColor=navy, spaceAfter=8)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="DejaVu-Bold", fontSize=12, leading=14, textColor=navy, spaceAfter=6)
+
+    title = "Case Αναφορά — Family Alignment" if lang == "GR" else "Case Report — Family Alignment"
+    today = datetime.now().strftime("%d/%m/%Y")
+
+    def footer(canvas, doc_):
+        canvas.saveState()
+        w, _ = A4
+        canvas.setStrokeColor(gold)
+        canvas.setLineWidth(1)
+        canvas.line(doc_.leftMargin, 14*mm, w-doc_.rightMargin, 14*mm)
+        canvas.setFont("DejaVu", 8)
+        canvas.setFillColor(grey)
+        canvas.drawString(doc_.leftMargin, 9.5*mm, "Strategize — Beyond the Bottom Line")
+        canvas.drawRightString(w-doc_.rightMargin, 9.5*mm, f"{canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    legacy_img = _img_keep_aspect(legacy_logo_path, 70)
+    strat_img = _img_keep_aspect(strategize_logo_path, 55)
+
+    company = (case_meta.get("company_name") or "").strip()
+    case_id = case_meta.get("case_id") or ""
+
+    story = []
+    top = Table([[legacy_img or "", strat_img or ""]], colWidths=[120*mm, 55*mm])
+    top.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("ALIGN",(1,0),(1,0),"RIGHT"),
+        ("LEFTPADDING",(0,0),(-1,-1),0),
+        ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING",(0,0),(-1,-1),0),
+        ("BOTTOMPADDING",(0,0),(-1,-1),0),
+    ]))
+    story.append(top)
+    story.append(Spacer(1, 16))
+    story.append(_p("<b>Legacy360°</b>", ParagraphStyle("ct", parent=h1, fontSize=24, leading=28)))
+    story.append(_p(title, ParagraphStyle("cs", parent=h2, fontSize=13, leading=16)))
+    story.append(Spacer(1, 12))
+    story.append(_p(f"<b>Company:</b> {company or '-'}", base))
+    story.append(_p(f"<b>Case ID:</b> {case_id}", base))
+    story.append(_p(f"<b>Date:</b> {today}", base))
+    story.append(PageBreak())
+
+    overall_avg = agg.get("overall_avg", float("nan"))
+    n = agg.get("participants_n", 0)
+
+    story.append(_p("Average Overall Index (0–100)" if lang == "EN" else "Μέσος Συνολικός Δείκτης (0–100)", h2))
+    story.append(_p(f"<b>{overall_avg:.1f}</b>", ParagraphStyle("big", parent=h1, fontSize=22, leading=26)))
+    story.append(_p(("Participants" if lang == "EN" else "Συμμετέχοντες") + f": <b>{n}</b>", base))
+    story.append(Spacer(1, 10))
+
+    # Domain averages + std
+    rows = [["Domain" if lang == "EN" else "Ενότητα", "Avg" if lang == "EN" else "Μ.Ο.", "Std"]]
+    for d in DOMAINS:
+        rows.append([
+            _p(DOMAIN_LABELS[lang][d.key], ParagraphStyle("d", parent=base, fontSize=9, leading=11)),
+            _p(f"{agg['domain_avg'].get(d.key, float('nan')):.2f}", ParagraphStyle("n", parent=base, fontSize=9, leading=11)),
+            _p(f"{agg['domain_std'].get(d.key, 0.0):.2f}", ParagraphStyle("n", parent=base, fontSize=9, leading=11)),
+        ])
+    tbl = Table(rows, colWidths=[125*mm, 22*mm, 22*mm], repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),navy),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"DejaVu-Bold"),
+        ("FONTSIZE",(0,0),(-1,0),9),
+        ("GRID",(0,0),(-1,-1),0.3,colors.lightgrey),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("ALIGN",(1,1),(-1,-1),"CENTER"),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.white]),
+        ("LEFTPADDING",(0,0),(-1,-1),4),
+        ("RIGHTPADDING",(0,0),(-1,-1),4),
+        ("TOPPADDING",(0,0),(-1,-1),3),
+        ("BOTTOMPADDING",(0,0),(-1,-1),3),
+    ]))
+    story.append(tbl)
+
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    pdf_bytes = buf.getvalue()
+    buf.close()
+    return pdf_bytes
+
+
+# =========================================================
+# DB RPC (participant) + DB (admin)
+# =========================================================
+
+def db_participant_validate_invite(raw_token: str) -> Dict[str, Any]:
+    sb = supabase_client(use_service_role=False)
+    token_hash = sha256_hex(raw_token)
+    res = sb.rpc("validate_invite", {"p_token_hash": token_hash}).execute()
+    if not res.data:
+        return {"valid": False}
+    row = res.data[0]
+    return {"valid": True, "token_hash": token_hash, **row}
+
+def db_participant_submit(raw_token: str, lang: str, answers_json: Dict[str, int], profile_json: Dict[str, Any], derived_json: Dict[str, Any]) -> str:
+    sb = supabase_client(use_service_role=False)
+    token_hash = sha256_hex(raw_token)
+    res = sb.rpc("submit_assessment", {
+        "p_token_hash": token_hash,
+        "p_lang": lang,
+        "p_questionnaire_version": QUESTIONNAIRE_VERSION,
+        "p_answers": answers_json,
+        "p_profile": profile_json,
+        "p_derived": derived_json,
+    }).execute()
+    return res.data
+
+def db_admin_list_cases(limit: int = 200) -> List[Dict[str, Any]]:
+    sb = supabase_client(use_service_role=True)
+    res = sb.table("cases").select("*").order("created_at", desc=True).limit(limit).execute()
+    return res.data or []
+
+def db_admin_create_case(payload: Dict[str, Any]) -> str:
+    sb = supabase_client(use_service_role=True)
+    res = sb.table("cases").insert(payload).execute()
+    return res.data[0]["case_id"]
+
+def db_admin_create_invite(case_id: str, participant_email: str, expires_days: int = 14, max_uses: int = 1) -> Dict[str, str]:
+    sb = supabase_client(use_service_role=True)
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = sha256_hex(raw_token)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=expires_days)).isoformat()
+
+    ins = {
+        "case_id": case_id,
+        "participant_email": participant_email,
+        "token_hash": token_hash,
+        "token_expires_at": expires_at,
+        "max_uses": max_uses,
+        "uses_count": 0,
+        "status": "ACTIVE",
+    }
+    res = sb.table("invites").insert(ins).execute()
+    invite_id = res.data[0]["invite_id"]
+    return {"invite_id": invite_id, "raw_token": raw_token}
+
+def db_admin_get_case(case_id: str) -> Dict[str, Any]:
+    sb = supabase_client(use_service_role=True)
+    res = sb.table("cases").select("*").eq("case_id", case_id).limit(1).execute()
+    return res.data[0] if res.data else {}
+
+def db_admin_get_submissions(case_id: str) -> List[Dict[str, Any]]:
+    sb = supabase_client(use_service_role=True)
+    res = sb.table("submissions").select("*").eq("case_id", case_id).order("submitted_at", desc=True).execute()
+    return res.data or []
+
+
+# =========================================================
+# STREAMLIT APP
+# =========================================================
 
 st.set_page_config(page_title="Legacy360°", layout="wide")
 
-# Language selector (Greek default)
-lang = st.sidebar.radio("Language / Γλώσσα", ["GR", "EN"], index=0)
+params = st.query_params
+is_admin = str(params.get("admin", "")).strip() in ("1", "true", "yes")
+token = str(params.get("token", "")).strip()
 
-# Assets paths (Cloud-safe)
+lang = st.sidebar.radio("Γλώσσα / Language", ["GR", "EN"], index=0)
+
 BASE_DIR = os.path.dirname(__file__)
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 LEGACY_LOGO = os.path.join(ASSETS_DIR, "legacy360.png")
 STRATEGIZE_LOGO = os.path.join(ASSETS_DIR, "strategize.png")
 
-
-# Header with logos
-header_left, header_right = st.columns([0.68, 0.32], vertical_alignment="center")
-
-with header_left:
-    if os.path.exists(LEGACY_LOGO):
-        st.image(LEGACY_LOGO, width=280)
-    else:
-        st.warning("Legacy360 logo not found in assets/ (legacy360.png)")
-    st.title(UI[lang]["app_title"])
-    st.caption(UI[lang]["tagline"])
-
-with header_right:
-    if os.path.exists(STRATEGIZE_LOGO):
-        st.image(STRATEGIZE_LOGO, width=240)
-    else:
-        st.warning("Strategize logo not found in assets/ (strategize.png)")
-
-st.markdown("<hr style='border:1px solid #C7922B; margin-top:10px; margin-bottom:10px;'>", unsafe_allow_html=True)
-
-# Intro + scale
-colA, colB = st.columns([0.55, 0.45])
-with colA:
-    st.subheader(UI[lang]["intro_title"])
-    st.write(UI[lang]["intro_body"])
-with colB:
-    with st.expander(UI[lang]["scale_title"], expanded=True):
-        for k in range(1, 6):
-            st.markdown(f"**{k}** — {UI[lang]['scale'][k]}")
-
-st.divider()
-
-# Group questions per domain
-domain_questions: Dict[str, List[Question]] = {d.key: [] for d in DOMAINS}
-for q in QUESTIONS:
-    domain_questions[q.domain_key].append(q)
-
-TOTAL_QUESTIONS = len(QUESTIONS)
-
-# Session state
-if "answers" not in st.session_state:
-    # None means unanswered (no preselection)
-    st.session_state["answers"] = {q.id: None for q in QUESTIONS}
-
-if "step" not in st.session_state:
-    # 0..len(DOMAINS)-1 domain steps, len(DOMAINS)=results
-    st.session_state["step"] = 0
-
-if "submitted" not in st.session_state:
-    st.session_state["submitted"] = False
+def header():
+    left, right = st.columns([0.68, 0.32], vertical_alignment="center")
+    with left:
+        if os.path.exists(LEGACY_LOGO):
+            st.image(LEGACY_LOGO, width=280)
+        st.title(UI[lang]["title"])
+        st.caption(UI[lang]["tagline"])
+    with right:
+        if os.path.exists(STRATEGIZE_LOGO):
+            st.image(STRATEGIZE_LOGO, width=240)
+    st.markdown("<hr style='border:1px solid #C7922B; margin-top:10px; margin-bottom:10px;'>", unsafe_allow_html=True)
 
 
-# Helpers
-def answered_count() -> int:
-    return sum(1 for v in st.session_state["answers"].values() if v is not None)
+def admin_dashboard():
+    header()
+    st.subheader("Admin Access")
+
+    admin_pass = _get_secret("ADMIN_PASSWORD", required=True)
+    if "admin_ok" not in st.session_state:
+        st.session_state["admin_ok"] = False
+
+    if not st.session_state["admin_ok"]:
+        pw = st.text_input(UI[lang]["admin_password"], type="password")
+        if st.button("Login"):
+            if pw == admin_pass:
+                st.session_state["admin_ok"] = True
+                st.rerun()
+            else:
+                st.error(UI[lang]["admin_wrong"])
+        st.stop()
+
+    tabs = st.tabs(["Cases", "Create Case", "Invites", "Aggregation"])
+
+    with tabs[0]:
+        cases = db_admin_list_cases()
+        st.dataframe(pd.DataFrame(cases), use_container_width=True, hide_index=True)
+
+    with tabs[1]:
+        company_name = st.text_input("Company name")
+        industry = st.text_input("Industry")
+        country = st.text_input("Country")
+        size_band = st.text_input("Size band (optional)")
+        created_by = st.text_input("Created by (optional)")
+
+        if st.button("Create", use_container_width=True, disabled=not company_name.strip()):
+            case_id = db_admin_create_case({
+                "company_name": company_name.strip(),
+                "industry": industry.strip() or None,
+                "country": country.strip() or None,
+                "size_band": size_band.strip() or None,
+                "created_by": created_by.strip() or None,
+            })
+            st.success(f"Created case_id: {case_id}")
+
+    with tabs[2]:
+        case_id = st.text_input("Case ID (uuid)")
+        email = st.text_input("Participant email")
+        expires_days = st.number_input("Expires in days", min_value=1, max_value=60, value=14)
+        max_uses = st.number_input("Max uses", min_value=1, max_value=5, value=1)
+        base_url = st.text_input("Participant app base URL (e.g., https://xxx.streamlit.app)", value="")
+
+        if st.button("Generate Invite", use_container_width=True, disabled=not(case_id.strip() and email.strip())):
+            inv = db_admin_create_invite(case_id.strip(), email.strip(), int(expires_days), int(max_uses))
+            link = f"{base_url.strip().rstrip('/')}/?token={inv['raw_token']}" if base_url.strip() else ""
+            st.code(f"Invite ID: {inv['invite_id']}\nToken (raw): {inv['raw_token']}\nLink: {link}".strip())
+
+    with tabs[3]:
+        case_id = st.text_input("Case ID to aggregate (uuid)", key="case_id_agg")
+        if not case_id.strip():
+            st.info("Enter a case_id")
+            st.stop()
+
+        case_meta = db_admin_get_case(case_id.strip())
+        subs = db_admin_get_submissions(case_id.strip())
+        if not subs:
+            st.warning("No submissions yet.")
+            st.stop()
+
+        agg = aggregate_case(lang, subs)
+
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            st.metric("Avg Overall (0–100)", f"{agg['overall_avg']:.1f}")
+        with k2:
+            st.metric("Participants", f"{agg['participants_n']}")
+        with k3:
+            st.metric("Consensus gaps", f"{len(agg['consensus_gaps'])}")
+
+        labels = [DOMAIN_LABELS[lang][d.key] for d in DOMAINS]
+        values = [agg["domain_avg"].get(d.key, float("nan")) for d in DOMAINS]
+        st.plotly_chart(make_radar(labels, values, "Family Alignment"), use_container_width=True)
+
+        case_df = agg["case_df"].copy()
+        case_df["Weight %"] = (case_df["weight"] * 100).round(0).astype(int)
+        case_df["Avg (1–5)"] = case_df["avg_score"].round(2)
+        case_df["Std"] = case_df["std"].round(2)
+        case_df["Band"] = case_df["band"].map(BAND_LABELS[lang])
+        st.dataframe(case_df[["domain", "Weight %", "Avg (1–5)", "Std", "Band", "risk"]].sort_values("risk", ascending=False),
+                     use_container_width=True, hide_index=True)
+
+        pdf = build_case_pdf(lang, case_meta, agg, LEGACY_LOGO, STRATEGIZE_LOGO)
+        st.download_button(UI[lang]["download_case_pdf"], data=pdf,
+                           file_name="Legacy360_Case_Alignment.pdf" if lang == "EN" else "Legacy360_Case_Ευθυγράμμιση.pdf",
+                           mime="application/pdf", use_container_width=True)
 
 
-def completion_ratio() -> float:
-    return answered_count() / TOTAL_QUESTIONS
+def participant_wizard():
+    header()
 
+    if not token:
+        st.error(UI[lang]["missing_token"])
+        st.stop()
 
-def domain_question_ids(domain_key: str) -> List[str]:
-    return [q.id for q in domain_questions[domain_key]]
+    v = db_participant_validate_invite(token)
+    if not v.get("valid"):
+        st.error(UI[lang]["token_invalid"])
+        st.stop()
 
+    case_id = v.get("case_id")
+    participant_email = v.get("participant_email") or ""
 
-def domain_is_complete(domain_key: str) -> bool:
-    return all(st.session_state["answers"][qid] is not None for qid in domain_question_ids(domain_key))
+    st.subheader(UI[lang]["profile"])
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        full_name = st.text_input("Full name (optional)")
+        email = st.text_input("Email", value=participant_email, disabled=True)
+        role_category = st.selectbox("Role category", ["", "Owner", "Family shareholder", "CEO", "Executive", "Board member", "Next gen", "Other"])
+    with c2:
+        generation = st.selectbox("Generation", ["", "Gen 1", "Gen 2", "Gen 3", "Gen 4+"])
+        age_band = st.selectbox("Age band", ["", "<30", "30–39", "40–49", "50–59", "60+"])
+        works_in_business = st.selectbox("Works in business", ["", "Yes", "No"])
+    with c3:
+        ownership = st.selectbox("Ownership", ["", "Yes", "No"])
+        board_member = st.selectbox("Board member", ["", "Yes", "No"])
+        st.caption(f"{UI[lang]['case']}: {case_id}")
 
-
-def go_next():
-    st.session_state["step"] = min(st.session_state["step"] + 1, len(DOMAINS))
-    st.rerun()
-
-
-def go_prev():
-    st.session_state["step"] = max(st.session_state["step"] - 1, 0)
-    st.rerun()
-
-
-def go_results():
-    st.session_state["step"] = len(DOMAINS)
-    st.rerun()
-
-
-# Progress UI
-st.markdown("### Progress / Πρόοδος")
-pct = int(round(completion_ratio() * 100))
-st.progress(completion_ratio())
-st.caption(f"{pct}% ({answered_count()}/{TOTAL_QUESTIONS})")
-
-st.divider()
-
-# Sidebar navigation (optional)
-with st.sidebar:
-    st.markdown("### Navigation / Πλοήγηση")
-    nav_labels = [f"{i+1}. {DOMAIN_LABELS[lang][d.key]}" for i, d in enumerate(DOMAINS)] + ["📊 Results / Αποτελέσματα"]
-    sel = st.radio(
-        " ",
-        options=list(range(len(DOMAINS) + 1)),
-        format_func=lambda i: nav_labels[i],
-        index=st.session_state["step"],
-        key="nav_radio"
-    )
-    if sel != st.session_state["step"]:
-        st.session_state["step"] = sel
-        st.rerun()
-
-
-# =========================
-# DOMAIN PAGES (wizard)
-# =========================
-if st.session_state["step"] < len(DOMAINS):
-    d = DOMAINS[st.session_state["step"]]
-    dom_key = d.key
-
-    st.markdown(f"## 🧭 {DOMAIN_LABELS[lang][dom_key]}")
-    st.caption(f"Weight / Βάρος: **{int(d.weight * 100)}%**")
-    st.write("")
-
-    for q in domain_questions[dom_key]:
-        key = f"ans_{q.id}"
-        options = ["—"] + [1, 2, 3, 4, 5]
-        current = st.session_state["answers"][q.id]
-        idx = 0 if current is None else options.index(current)
-
-        choice = st.selectbox(
-            label=f"**{q.id}** — {q.text[lang]}",
-            options=options,
-            index=idx,
-            help=UI[lang]["question_help"],
-            key=key
-        )
-
-        st.session_state["answers"][q.id] = None if choice == "—" else int(choice)
-        st.write("")
-
-    missing_in_domain = [qid for qid in domain_question_ids(dom_key) if st.session_state["answers"][qid] is None]
-    if missing_in_domain:
-        st.warning(UI[lang]["missing_count"].format(n=len(missing_in_domain)))
+    profile_json = {
+        "full_name": full_name.strip() or None,
+        "email": participant_email,
+        "role_category": role_category or None,
+        "generation": generation or None,
+        "age_band": age_band or None,
+        "works_in_business": (works_in_business == "Yes") if works_in_business else None,
+        "ownership": (ownership == "Yes") if ownership else None,
+        "board_member": (board_member == "Yes") if board_member else None,
+    }
 
     st.divider()
 
-    left_btn, right_btn = st.columns([0.35, 0.65])
+    if "answers" not in st.session_state:
+        st.session_state["answers"] = {q.id: None for q in QUESTIONS}
+    if "step" not in st.session_state:
+        st.session_state["step"] = 0
+    if "submitted" not in st.session_state:
+        st.session_state["submitted"] = False
 
-    with left_btn:
-        if st.session_state["step"] > 0:
-            st.button(UI[lang]["back_btn"], use_container_width=True, on_click=go_prev)
+    total_q = len(QUESTIONS)
+    answered = sum(1 for v in st.session_state["answers"].values() if v is not None)
+    ratio = answered / total_q
 
-    with right_btn:
-        is_last_domain = (st.session_state["step"] == len(DOMAINS) - 1)
-        can_proceed = domain_is_complete(dom_key)
+    st.markdown(f"### {UI[lang]['progress']}")
+    st.progress(ratio)
+    st.caption(f"{int(round(ratio*100))}% ({answered}/{total_q})")
+    st.divider()
 
-        if not is_last_domain:
-            st.button(
-                UI[lang]["next_btn"],
-                use_container_width=True,
-                disabled=not can_proceed,
-                on_click=go_next
+    dq = domain_questions_map()
+
+    # ========= Wizard pages =========
+    if st.session_state["step"] < len(DOMAINS):
+        d = DOMAINS[st.session_state["step"]]
+        dom_key = d.key
+        st.markdown(f"## 🧭 {DOMAIN_LABELS[lang][dom_key]}")
+        st.caption(f"Weight: {int(d.weight*100)}%")
+
+        # Questions in this domain
+        for q in [qq for qq in QUESTIONS if qq.domain_key == dom_key]:
+            options = ["—", 1, 2, 3, 4, 5]
+            current = st.session_state["answers"][q.id]
+            idx = 0 if current is None else options.index(current)
+
+            val = st.selectbox(
+                label=f"**{q.id}** — {q.text[lang]}",
+                options=options,
+                index=idx,
+                key=f"q_{q.id}"
             )
-        else:
-            st.button(
-                UI[lang]["see_results_btn"],
-                use_container_width=True,
-                disabled=not can_proceed,
-                on_click=go_results
-            )
+            st.session_state["answers"][q.id] = None if val == "—" else int(val)
 
+        missing = [qid for qid in dq[dom_key] if st.session_state["answers"][qid] is None]
+        if missing:
+            st.warning(f"{len(missing)} unanswered questions remain in this section.")
 
-# =========================
-# RESULTS PAGE
-# =========================
-else:
+        # ===== Navigation (deterministic, no callbacks) =====
+        st.divider()
+        left, right = st.columns([0.35, 0.65])
+
+        with left:
+            if st.session_state["step"] > 0:
+                if st.button("⬅️ Previous", use_container_width=True, key=f"btn_prev_{st.session_state['step']}"):
+                    st.session_state["step"] = max(st.session_state["step"] - 1, 0)
+                    st.rerun()
+
+        with right:
+            can_go = (len(missing) == 0)
+            is_last = (st.session_state["step"] == len(DOMAINS) - 1)
+
+            if is_last:
+                if st.button("Δες τα Αποτελέσματα / See Results 📊",
+                             use_container_width=True, disabled=not can_go,
+                             key=f"btn_results_{st.session_state['step']}"):
+                    st.session_state["step"] = len(DOMAINS)
+                    st.rerun()
+            else:
+                if st.button("Επόμενη Ενότητα / Next Section ➡️",
+                             use_container_width=True, disabled=not can_go,
+                             key=f"btn_next_{st.session_state['step']}"):
+                    st.session_state["step"] = min(st.session_state["step"] + 1, len(DOMAINS))
+                    st.rerun()
+
+        return
+
+    # ========= Results page =========
     st.markdown(f"## 📊 {UI[lang]['results']}")
 
-    # Global validation
-    if answered_count() < TOTAL_QUESTIONS:
-        st.error(UI[lang]["incomplete_all"])
-        st.button(UI[lang]["back_btn"], on_click=go_prev)
+    if any(v is None for v in st.session_state["answers"].values()):
+        st.error("Some questions are unanswered. Please complete all sections.")
         st.stop()
+
+    answers_json = {k: int(v) for k, v in st.session_state["answers"].items()}
+    domain_scores = compute_domain_scores(answers_json)
+    overall = weighted_index(domain_scores)
+    df = build_domain_df(lang, domain_scores)
+
+    # Charts
+    labels = [DOMAIN_LABELS[lang][d.key] for d in DOMAINS]
+    values = [domain_scores[d.key] for d in DOMAINS]
+    st.plotly_chart(make_radar(labels, values, UI[lang]["results"]), use_container_width=True)
 
     # Submit lock
     if not st.session_state["submitted"]:
-        st.info(UI[lang]["submit_info"])
-        if st.button(UI[lang]["submit_btn"], use_container_width=True):
-            st.session_state["submitted"] = True
-            st.rerun()
+        st.info("Press Submit to store and lock results.")
+        if st.button(UI[lang]["submit"], use_container_width=True):
+            derived_json = {"domain_scores": {k: float(v) for k, v in domain_scores.items()}, "overall": float(overall)}
+            try:
+                db_participant_submit(token, lang, answers_json, profile_json, derived_json)
+                st.session_state["submitted"] = True
+                st.success(UI[lang]["submitted_ok"])
+                st.rerun()
+            except Exception as e:
+                st.error(f"Submission failed: {e}")
+                st.stop()
         st.stop()
 
-    # Compute domain scores
-    domain_scores: Dict[str, float] = {}
-    rows = []
-    for dd in DOMAINS:
-        vals = [st.session_state["answers"][q.id] for q in domain_questions[dd.key]]
-        avg = float(np.mean(vals))
-        domain_scores[dd.key] = avg
-        rows.append({
-            "domain_key": dd.key,
-            "domain": DOMAIN_LABELS[lang][dd.key],
-            "weight": dd.weight,
-            "avg_score": avg,
-            "band": band_for_score(avg),
-            "risk": risk_priority(avg, dd.weight),
-        })
-
-    df = pd.DataFrame(rows).sort_values("risk", ascending=False)
-    overall = weighted_index(domain_scores)
-
-    # KPI row
-    k1, k2, k3 = st.columns([0.34, 0.33, 0.33])
-    with k1:
-        st.metric(UI[lang]["overall_index"], f"{overall:.1f}")
-        st.progress(min(max(overall / 100.0, 0.0), 1.0))
-    with k2:
-        red_count = int((df["band"] == "RED").sum())
-        amber_count = int((df["band"] == "AMBER").sum())
-        green_count = int((df["band"] == "GREEN").sum())
-        st.metric("Domains (R / A / G)", f"{red_count} / {amber_count} / {green_count}")
-    with k3:
-        top = df.iloc[0]
-        st.metric("Top Risk Domain" if lang == "EN" else "Κορυφαίος Κίνδυνος", f"{top['domain']}")
-
-    st.divider()
-
-    # Charts
-    c1, c2 = st.columns([0.52, 0.48])
-    labels = [DOMAIN_LABELS[lang][d.key] for d in DOMAINS]
-    values = [domain_scores[d.key] for d in DOMAINS]
-
-    with c1:
-        st.plotly_chart(make_radar(labels, values, UI[lang]["radar"]), use_container_width=True)
-
-    with c2:
-        bar_df = pd.DataFrame({"Domain": labels, "Avg (1–5)": values})
-        fig = go.Figure(go.Bar(x=bar_df["Domain"], y=bar_df["Avg (1–5)"]))
-        fig.update_layout(
-            title=UI[lang]["bars"],
-            height=380,
-            margin=dict(l=30, r=30, t=50, b=80),
-            xaxis_tickangle=-25,
-            yaxis=dict(range=[1, 5]),
-            showlegend=False
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.divider()
-
-    # Risk table
-    st.subheader(UI[lang]["risk_matrix"])
+    # Domain table
     show = df.copy()
-    show["Weight %"] = (show["weight"] * 100).round(0).astype(int)
+    show["Weight %"] = (show["weight"]*100).round(0).astype(int)
     show["Avg (1–5)"] = show["avg_score"].round(2)
     show["Band"] = show["band"].map(BAND_LABELS[lang])
-    show["Risk Score"] = show["risk"].round(3)
-    show = show[["domain", "Weight %", "Avg (1–5)", "Band", "Risk Score"]]
-    st.dataframe(show, use_container_width=True, hide_index=True)
+    show["Risk"] = show["risk"].round(3)
+    st.dataframe(show[["domain","Weight %","Avg (1–5)","Band","Risk"]], use_container_width=True, hide_index=True)
 
-    st.divider()
-
-    # Priorities
-    st.subheader(UI[lang]["priority_title"])
-    pri = df.head(5)
-    for _, r in pri.iterrows():
-        band = r["band"]
-        st.markdown(f"### {'🔴' if band == 'RED' else '🟡' if band == 'AMBER' else '🟢'} {r['domain']}")
-        st.caption(f"Weight / Βάρος: {int(r['weight'] * 100)}% · Avg: {r['avg_score']:.2f} · {BAND_LABELS[lang][band]}")
-        st.write(DOMAIN_INTERP[lang][band])
-
-    st.divider()
-
-    # Interpretations
-    st.subheader(UI[lang]["interpretations"])
-    overall_band = band_for_score(float(np.mean(list(domain_scores.values()))))
-    st.markdown(f"### {UI[lang]['overall_interp_title']}")
-    st.write(OVERALL_INTERP[lang][overall_band])
-
-    # ---------------------------
-    # Commercial bridge (ONLY on Results)
-    # ---------------------------
-    na = NEXT_ACTIONS[lang]
-    with st.expander("🚀 " + UI[lang]["cta_expander_title"], expanded=True):
-        st.write(na["intro"])
-        for b in na["bullets"]:
-            st.markdown(f"- {b}")
-
-        st.markdown(f"**{na['cta_title']}**")
-        st.write(na["cta_body"])
-
-        cta1, cta2 = st.columns([0.55, 0.45])
-        with cta1:
-            mailto = (
-                f"mailto:{na['cta_email']}?subject=Legacy360%20Results%20Review"
-                f"&body=Hello%2C%0A%0AI%20would%20like%20a%2020%E2%80%99%20review%20call%20to%20discuss%20our%20Legacy360%20results.%0A%0ARegards%2C"
-            )
-            st.markdown(
-                f"""
-                <a href="{mailto}" target="_blank" style="
-                    display:inline-block; padding:12px 16px; border-radius:10px;
-                    background:#0B2C5D; color:white; text-decoration:none; font-weight:600;">
-                    {na['cta_button']}
-                </a>
-                """,
-                unsafe_allow_html=True
-            )
-        with cta2:
-            st.markdown(f"**Email:** {na['cta_email']}")
-            st.markdown(f"**Website:** {na['cta_site']}")
-            st.caption(na["cta_note"])
-
-    st.divider()
-
-    # Build answers dataframe for export
+    # Export PDF
     out_rows = []
     for q in QUESTIONS:
         out_rows.append({
             "question_id": q.id,
-            "domain_key": q.domain_key,
             "domain_gr": DOMAIN_LABELS["GR"][q.domain_key],
             "domain_en": DOMAIN_LABELS["EN"][q.domain_key],
             "question_gr": q.text["GR"],
             "question_en": q.text["EN"],
-            "score": st.session_state["answers"][q.id],
+            "score": answers_json[q.id],
         })
     out = pd.DataFrame(out_rows)
 
-    # CSV download
-    csv_bytes = out.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        UI[lang]["download_csv"],
-        data=csv_bytes,
-        file_name="legacy360_results.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
+    pdf = build_participant_pdf(lang, df, float(overall), out, LEGACY_LOGO, STRATEGIZE_LOGO)
+    st.download_button(UI[lang]["download_pdf"], data=pdf,
+                       file_name="Legacy360_Report.pdf" if lang == "EN" else "Legacy360_Αναφορά.pdf",
+                       mime="application/pdf", use_container_width=True)
 
-    # PDF download
-    pdf_bytes = build_pdf_report(
-        lang=lang,
-        df_domains=df,
-        overall_0_100=overall,
-        overall_band=overall_band,
-        answers_df=out,
-        legacy_logo_path=LEGACY_LOGO,
-        strategize_logo_path=STRATEGIZE_LOGO,
-    )
 
-    pdf_filename = "Legacy360_Report.pdf" if lang == "EN" else "Legacy360_Αναφορά.pdf"
-    st.download_button(
-        UI[lang]["download_pdf"],
-        data=pdf_bytes,
-        file_name=pdf_filename,
-        mime="application/pdf",
-        use_container_width=True
-    )
+# =========================================================
+# ENTRY
+# =========================================================
 
-    st.divider()
+if is_admin:
+    admin_dashboard()
+else:
+    participant_wizard()
 
-    # Restart assessment
-    if st.button("🔄 Νέα Αξιολόγηση / New Assessment", use_container_width=True):
-        st.session_state["answers"] = {q.id: None for q in QUESTIONS}
-        st.session_state["step"] = 0
-        st.session_state["submitted"] = False
-        st.rerun()
