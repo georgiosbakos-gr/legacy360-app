@@ -1,5 +1,7 @@
 # legacy360_app.py
-# Legacy360° V1 — Participant Wizard + Admin Dashboard (Supabase, token invites, JSONB, aggregation, premium PDF)
+# Legacy360° V1 — Streamlit single-file app
+# Participant wizard (token invites) + Admin dashboard (cases/invites/aggregation) + Premium PDFs
+# Supabase backend (Postgres + JSONB via RPC)
 
 import os
 import json
@@ -358,18 +360,26 @@ def make_radar(labels: List[str], values: List[float], title: str):
 # PDF HELPERS (logos + wrapping)
 # =========================================================
 
-def _img_keep_aspect(path: str, width_mm: float):
+def _img_contain(path: str, max_w_mm: float, max_h_mm: float):
+    """
+    CSS-like 'contain': keep aspect ratio, fit into max_w x max_h box.
+    Avoids squeezing for square PNGs.
+    """
     try:
-        if path and os.path.exists(path):
-            ir = ImageReader(path)
-            iw, ih = ir.getSize()
-            aspect = ih / float(iw)
-            w = width_mm * mm
-            h = (width_mm * aspect) * mm
-            return Image(path, width=w, height=h)
+        if not (path and os.path.exists(path)):
+            return None
+        ir = ImageReader(path)
+        iw, ih = ir.getSize()
+        if iw <= 0 or ih <= 0:
+            return None
+        box_w = max_w_mm * mm
+        box_h = max_h_mm * mm
+        scale = min(box_w / float(iw), box_h / float(ih))
+        w = iw * scale
+        h = ih * scale
+        return Image(path, width=w, height=h)
     except Exception:
         return None
-    return None
 
 def _p(text: str, style: ParagraphStyle) -> Paragraph:
     return Paragraph(text.replace("\n", "<br/>"), style)
@@ -413,15 +423,19 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
         canvas.drawRightString(w-doc_.rightMargin, 9.5*mm, f"{L['page']} {canvas.getPageNumber()}")
         canvas.restoreState()
 
-    legacy_img = _img_keep_aspect(legacy_logo_path, 70)
-    strat_img = _img_keep_aspect(strategize_logo_path, 55)
+    # Stable header: sizes designed for square PNGs
+    legacy_img = _img_contain(legacy_logo_path, max_w_mm=62, max_h_mm=18)
+    strat_img  = _img_contain(strategize_logo_path, max_w_mm=48, max_h_mm=18)
 
     story = []
 
-    # Cover
-    top = Table([[legacy_img or "", strat_img or ""]], colWidths=[120*mm, 55*mm])
+    # Cover header
+    top = Table([[legacy_img or "", strat_img or ""]],
+                colWidths=[120*mm, 55*mm],
+                rowHeights=[20*mm])
     top.setStyle(TableStyle([
-        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("ALIGN",(0,0),(0,0),"LEFT"),
         ("ALIGN",(1,0),(1,0),"RIGHT"),
         ("LEFTPADDING",(0,0),(-1,-1),0),
         ("RIGHTPADDING",(0,0),(-1,-1),0),
@@ -429,19 +443,20 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
         ("BOTTOMPADDING",(0,0),(-1,-1),0),
     ]))
     story.append(top)
-    story.append(Spacer(1, 16))
+    story.append(Spacer(1, 14))
+
     story.append(_p("<b>Legacy360°</b>", ParagraphStyle("ct", parent=h1, fontSize=24, leading=28)))
     story.append(_p("Family Governance & Succession Roadmap", ParagraphStyle("cs", parent=h2, fontSize=13, leading=16)))
     story.append(Spacer(1, 6))
     story.append(_p(f"<font color='{gold.hexval()}'>a Strategize service</font>", small))
-    story.append(Spacer(1, 16))
-    story.append(Table([[""]], colWidths=[175*mm], style=TableStyle([("LINEBELOW",(0,0),(-1,-1),1.2,gold)])))
     story.append(Spacer(1, 14))
+    story.append(Table([[""]], colWidths=[175*mm], style=TableStyle([("LINEBELOW",(0,0),(-1,-1),1.2,gold)])))
+    story.append(Spacer(1, 12))
     story.append(_p(f"<b>{L['report']}</b>", h2))
     story.append(_p(f"{L['date']}: {datetime.now().strftime('%d/%m/%Y')}", base))
     story.append(PageBreak())
 
-    # Domain Summary table (wrapped)
+    # Domain Summary table
     story.append(_p(L["summary"], h2))
 
     dd = df_domains.copy()
@@ -547,16 +562,21 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
         canvas.drawRightString(w-doc_.rightMargin, 9.5*mm, f"{canvas.getPageNumber()}")
         canvas.restoreState()
 
-    legacy_img = _img_keep_aspect(legacy_logo_path, 70)
-    strat_img = _img_keep_aspect(strategize_logo_path, 55)
+    # Same stable header logic
+    legacy_img = _img_contain(legacy_logo_path, max_w_mm=62, max_h_mm=18)
+    strat_img  = _img_contain(strategize_logo_path, max_w_mm=48, max_h_mm=18)
 
     company = (case_meta.get("company_name") or "").strip()
     case_id = case_meta.get("case_id") or ""
 
     story = []
-    top = Table([[legacy_img or "", strat_img or ""]], colWidths=[120*mm, 55*mm])
+
+    top = Table([[legacy_img or "", strat_img or ""]],
+                colWidths=[120*mm, 55*mm],
+                rowHeights=[20*mm])
     top.setStyle(TableStyle([
-        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("ALIGN",(0,0),(0,0),"LEFT"),
         ("ALIGN",(1,0),(1,0),"RIGHT"),
         ("LEFTPADDING",(0,0),(-1,-1),0),
         ("RIGHTPADDING",(0,0),(-1,-1),0),
@@ -564,13 +584,18 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
         ("BOTTOMPADDING",(0,0),(-1,-1),0),
     ]))
     story.append(top)
-    story.append(Spacer(1, 16))
+    story.append(Spacer(1, 14))
+
     story.append(_p("<b>Legacy360°</b>", ParagraphStyle("ct", parent=h1, fontSize=24, leading=28)))
     story.append(_p(title, ParagraphStyle("cs", parent=h2, fontSize=13, leading=16)))
     story.append(Spacer(1, 12))
+
     story.append(_p(f"<b>Company:</b> {company or '-'}", base))
     story.append(_p(f"<b>Case ID:</b> {case_id}", base))
     story.append(_p(f"<b>Date:</b> {today}", base))
+
+    story.append(Spacer(1, 10))
+    story.append(Table([[""]], colWidths=[175*mm], style=TableStyle([("LINEBELOW",(0,0),(-1,-1),1.0,gold)])))
     story.append(PageBreak())
 
     overall_avg = agg.get("overall_avg", float("nan"))
@@ -588,6 +613,7 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
             _p(f"{agg['domain_avg'].get(d.key, float('nan')):.2f}", ParagraphStyle("n", parent=base, fontSize=9, leading=11)),
             _p(f"{agg['domain_std'].get(d.key, 0.0):.2f}", ParagraphStyle("n", parent=base, fontSize=9, leading=11)),
         ])
+
     tbl = Table(rows, colWidths=[125*mm, 22*mm, 22*mm], repeatRows=1)
     tbl.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0),navy),
@@ -605,6 +631,23 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
     ]))
     story.append(tbl)
 
+    story.append(Spacer(1, 14))
+    story.append(_p("Interpretation & Alignment" if lang == "EN" else "Ερμηνεία & Ευθυγράμμιση", h2))
+
+    # Simple alignment narrative based on Std
+    case_df = agg["case_df"].copy()
+    high_var = case_df.sort_values("std", ascending=False).head(3)
+    low_score = case_df.sort_values("avg_score", ascending=True).head(3)
+
+    if lang == "EN":
+        story.append(_p("Higher standard deviation indicates lower alignment across respondents.", base))
+        story.append(_p("<b>Top misalignment areas:</b> " + ", ".join(high_var["domain"].tolist()), base))
+        story.append(_p("<b>Lowest maturity areas:</b> " + ", ".join(low_score["domain"].tolist()), base))
+    else:
+        story.append(_p("Υψηλότερη τυπική απόκλιση σημαίνει χαμηλότερη ευθυγράμμιση μεταξύ των συμμετεχόντων.", base))
+        story.append(_p("<b>Περιοχές με τη μεγαλύτερη απόκλιση:</b> " + ", ".join(high_var["domain"].tolist()), base))
+        story.append(_p("<b>Χαμηλότερες βαθμολογίες ωριμότητας:</b> " + ", ".join(low_score["domain"].tolist()), base))
+
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
     pdf_bytes = buf.getvalue()
     buf.close()
@@ -621,8 +664,7 @@ def db_participant_validate_invite(raw_token: str) -> Dict[str, Any]:
     res = sb.rpc("validate_invite", {"p_token_hash": token_hash}).execute()
     if not res.data:
         return {"valid": False}
-    row = res.data[0]
-    # row includes: case_id, invite_id, participant_email, status
+    row = res.data[0]  # case_id, invite_id, participant_email, status
     return {"valid": True, "token_hash": token_hash, **row}
 
 def db_participant_submit(raw_token: str, lang: str, answers_json: Dict[str, int], profile_json: Dict[str, Any], derived_json: Dict[str, Any]) -> Any:
@@ -874,7 +916,7 @@ def participant_wizard():
 
     dq = domain_questions_map()
 
-    # --- Sidebar sections status (restores "left menu" feel) ---
+    # Sidebar sections status (restores "left menu" feel)
     with st.sidebar:
         st.markdown("### 🧭 Sections")
         for i, d in enumerate(DOMAINS):
@@ -885,7 +927,7 @@ def participant_wizard():
             current = "➡️ " if i == st.session_state["step"] else ""
             st.markdown(f"{current}{marker} {DOMAIN_LABELS[lang][dom_key]}")
 
-    # ========= Wizard pages =========
+    # Wizard pages
     if st.session_state["step"] < len(DOMAINS):
         d = DOMAINS[st.session_state["step"]]
         dom_key = d.key
@@ -909,7 +951,6 @@ def participant_wizard():
         if missing:
             st.warning(f"{len(missing)} unanswered questions remain in this section.")
 
-        # Deterministic navigation
         st.divider()
         left, right = st.columns([0.35, 0.65])
 
@@ -935,10 +976,9 @@ def participant_wizard():
                              key=f"btn_next_{st.session_state['step']}"):
                     st.session_state["step"] = min(st.session_state["step"] + 1, len(DOMAINS))
                     st.rerun()
-
         return
 
-    # ========= Results page =========
+    # Results page
     st.markdown(f"## 📊 {UI[lang]['results']}")
 
     if any(vv is None for vv in st.session_state["answers"].values()):
