@@ -194,6 +194,7 @@ UI = {
         "tagline": "a Strategize service",
         "missing_token": "Λείπει ή είναι άκυρο το invite token. Παρακαλώ χρησιμοποιήστε το link που λάβατε.",
         "token_invalid": "Το invite token δεν είναι έγκυρο/έχει λήξει/έχει χρησιμοποιηθεί.",
+        "token_used_readonly": "Το invite έχει ήδη χρησιμοποιηθεί. Μπορείτε να δείτε/κατεβάσετε τα αποτελέσματα, αλλά όχι να κάνετε νέα υποβολή.",
         "profile": "Στοιχεία Συμμετέχοντα",
         "case": "Case ID",
         "progress": "Πρόοδος",
@@ -211,6 +212,7 @@ UI = {
         "tagline": "a Strategize service",
         "missing_token": "Missing or invalid invite token. Please use the link you received.",
         "token_invalid": "Invite token is invalid/expired/used.",
+        "token_used_readonly": "Invite already used. You can view/download results but cannot submit again.",
         "profile": "Participant Profile",
         "case": "Case ID",
         "progress": "Progress",
@@ -234,19 +236,6 @@ BANDS = [
 BAND_LABELS = {
     "GR": {"RED": "ΚΟΚΚΙΝΟ", "AMBER": "ΚΙΤΡΙΝΟ", "GREEN": "ΠΡΑΣΙΝΟ"},
     "EN": {"RED": "RED", "AMBER": "AMBER", "GREEN": "GREEN"},
-}
-
-DOMAIN_INTERP = {
-    "GR": {
-        "RED": "Υπάρχουν ουσιαστικά κενά δομής/εφαρμογής. Ο κίνδυνος κλιμάκωσης είναι αυξημένος.",
-        "AMBER": "Μερικώς ορισμένο πλαίσιο. Απαιτείται τυποποίηση και πειθαρχία εφαρμογής.",
-        "GREEN": "Ενσωματωμένο και αποτελεσματικό. Συνιστάται περιοδική αναθεώρηση.",
-    },
-    "EN": {
-        "RED": "Material gaps exist. Escalation risk is elevated.",
-        "AMBER": "Partially defined; standardisation and disciplined adoption are required.",
-        "GREEN": "Embedded and effective; maintain via periodic review.",
-    }
 }
 
 
@@ -334,9 +323,6 @@ def aggregate_case(lang: str, submissions: List[Dict[str, Any]]) -> Dict[str, An
     dom_std = {k: (float(np.std(dom_vals[k], ddof=0)) if len(dom_vals[k]) >= 2 else 0.0) for k in domains}
     overall_avg = float(np.mean(overall_vals)) if overall_vals else float("nan")
 
-    gaps = [{"domain_key": k, "avg": dom_avg[k], "std": dom_std[k]} for k in domains if dom_std[k] >= 0.8]
-    gaps.sort(key=lambda x: x["std"], reverse=True)
-
     case_df = build_domain_df(lang, dom_avg)
     case_df["std"] = case_df["domain_key"].map(dom_std)
 
@@ -345,7 +331,6 @@ def aggregate_case(lang: str, submissions: List[Dict[str, Any]]) -> Dict[str, An
         "domain_avg": dom_avg,
         "domain_std": dom_std,
         "overall_avg": overall_avg,
-        "consensus_gaps": gaps,
         "case_df": case_df,
     }
 
@@ -476,7 +461,6 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
             _p(f"{r['Risk']:.3f}", ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
         ])
 
-    # safer column widths to avoid overflow
     dom_tbl = Table(rows, colWidths=[90*mm, 18*mm, 18*mm, 28*mm, 21*mm], repeatRows=1)
     dom_tbl.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0),navy),
@@ -493,9 +477,7 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
         ("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]))
     story.append(dom_tbl)
-    story.append(Spacer(1, 12))
 
-    # Appendix table (wrapped)
     story.append(PageBreak())
     story.append(_p(L["appendix"], h2))
 
@@ -547,7 +529,6 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
     grey = colors.HexColor("#6B7280")
 
     base = ParagraphStyle("base", parent=styles["BodyText"], fontName="DejaVu", fontSize=10, leading=13)
-    small = ParagraphStyle("small", parent=base, fontName="DejaVu", fontSize=9, leading=12, textColor=grey)
     h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="DejaVu-Bold", fontSize=18, leading=22, textColor=navy, spaceAfter=8)
     h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="DejaVu-Bold", fontSize=12, leading=14, textColor=navy, spaceAfter=6)
 
@@ -600,7 +581,6 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
     story.append(_p(("Participants" if lang == "EN" else "Συμμετέχοντες") + f": <b>{n}</b>", base))
     story.append(Spacer(1, 10))
 
-    # Domain averages + std
     rows = [["Domain" if lang == "EN" else "Ενότητα", "Avg" if lang == "EN" else "Μ.Ο.", "Std"]]
     for d in DOMAINS:
         rows.append([
@@ -642,9 +622,10 @@ def db_participant_validate_invite(raw_token: str) -> Dict[str, Any]:
     if not res.data:
         return {"valid": False}
     row = res.data[0]
+    # row includes: case_id, invite_id, participant_email, status
     return {"valid": True, "token_hash": token_hash, **row}
 
-def db_participant_submit(raw_token: str, lang: str, answers_json: Dict[str, int], profile_json: Dict[str, Any], derived_json: Dict[str, Any]) -> str:
+def db_participant_submit(raw_token: str, lang: str, answers_json: Dict[str, int], profile_json: Dict[str, Any], derived_json: Dict[str, Any]) -> Any:
     sb = supabase_client(use_service_role=False)
     token_hash = sha256_hex(raw_token)
     res = sb.rpc("submit_assessment", {
@@ -800,7 +781,7 @@ def admin_dashboard():
         with k2:
             st.metric("Participants", f"{agg['participants_n']}")
         with k3:
-            st.metric("Consensus gaps", f"{len(agg['consensus_gaps'])}")
+            st.metric("Domains", f"{len(DOMAINS)}")
 
         labels = [DOMAIN_LABELS[lang][d.key] for d in DOMAINS]
         values = [agg["domain_avg"].get(d.key, float("nan")) for d in DOMAINS]
@@ -811,13 +792,19 @@ def admin_dashboard():
         case_df["Avg (1–5)"] = case_df["avg_score"].round(2)
         case_df["Std"] = case_df["std"].round(2)
         case_df["Band"] = case_df["band"].map(BAND_LABELS[lang])
-        st.dataframe(case_df[["domain", "Weight %", "Avg (1–5)", "Std", "Band", "risk"]].sort_values("risk", ascending=False),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(
+            case_df[["domain", "Weight %", "Avg (1–5)", "Std", "Band", "risk"]].sort_values("risk", ascending=False),
+            use_container_width=True, hide_index=True
+        )
 
         pdf = build_case_pdf(lang, case_meta, agg, LEGACY_LOGO, STRATEGIZE_LOGO)
-        st.download_button(UI[lang]["download_case_pdf"], data=pdf,
-                           file_name="Legacy360_Case_Alignment.pdf" if lang == "EN" else "Legacy360_Case_Ευθυγράμμιση.pdf",
-                           mime="application/pdf", use_container_width=True)
+        st.download_button(
+            UI[lang]["download_case_pdf"],
+            data=pdf,
+            file_name="Legacy360_Case_Alignment.pdf" if lang == "EN" else "Legacy360_Case_Ευθυγράμμιση.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
 
 
 def participant_wizard():
@@ -832,8 +819,14 @@ def participant_wizard():
         st.error(UI[lang]["token_invalid"])
         st.stop()
 
+    token_status = str(v.get("status") or "").upper()
+    read_only = (token_status == "USED")  # after submit: allow view/download, block new submit
+
     case_id = v.get("case_id")
     participant_email = v.get("participant_email") or ""
+
+    if read_only:
+        st.info(UI[lang]["token_used_readonly"])
 
     st.subheader(UI[lang]["profile"])
     c1, c2, c3 = st.columns(3)
@@ -871,8 +864,8 @@ def participant_wizard():
         st.session_state["submitted"] = False
 
     total_q = len(QUESTIONS)
-    answered = sum(1 for v in st.session_state["answers"].values() if v is not None)
-    ratio = answered / total_q
+    answered = sum(1 for vv in st.session_state["answers"].values() if vv is not None)
+    ratio = answered / total_q if total_q else 0.0
 
     st.markdown(f"### {UI[lang]['progress']}")
     st.progress(ratio)
@@ -881,6 +874,17 @@ def participant_wizard():
 
     dq = domain_questions_map()
 
+    # --- Sidebar sections status (restores "left menu" feel) ---
+    with st.sidebar:
+        st.markdown("### 🧭 Sections")
+        for i, d in enumerate(DOMAINS):
+            dom_key = d.key
+            missing_dom = [qid for qid in dq[dom_key] if st.session_state["answers"][qid] is None]
+            done = (len(missing_dom) == 0)
+            marker = "✅" if done else "⬜"
+            current = "➡️ " if i == st.session_state["step"] else ""
+            st.markdown(f"{current}{marker} {DOMAIN_LABELS[lang][dom_key]}")
+
     # ========= Wizard pages =========
     if st.session_state["step"] < len(DOMAINS):
         d = DOMAINS[st.session_state["step"]]
@@ -888,7 +892,6 @@ def participant_wizard():
         st.markdown(f"## 🧭 {DOMAIN_LABELS[lang][dom_key]}")
         st.caption(f"Weight: {int(d.weight*100)}%")
 
-        # Questions in this domain
         for q in [qq for qq in QUESTIONS if qq.domain_key == dom_key]:
             options = ["—", 1, 2, 3, 4, 5]
             current = st.session_state["answers"][q.id]
@@ -906,7 +909,7 @@ def participant_wizard():
         if missing:
             st.warning(f"{len(missing)} unanswered questions remain in this section.")
 
-        # ===== Navigation (deterministic, no callbacks) =====
+        # Deterministic navigation
         st.divider()
         left, right = st.columns([0.35, 0.65])
 
@@ -938,33 +941,38 @@ def participant_wizard():
     # ========= Results page =========
     st.markdown(f"## 📊 {UI[lang]['results']}")
 
-    if any(v is None for v in st.session_state["answers"].values()):
+    if any(vv is None for vv in st.session_state["answers"].values()):
         st.error("Some questions are unanswered. Please complete all sections.")
         st.stop()
 
-    answers_json = {k: int(v) for k, v in st.session_state["answers"].items()}
+    answers_json = {k: int(vv) for k, vv in st.session_state["answers"].items()}
     domain_scores = compute_domain_scores(answers_json)
     overall = weighted_index(domain_scores)
     df = build_domain_df(lang, domain_scores)
 
-    # Charts
     labels = [DOMAIN_LABELS[lang][d.key] for d in DOMAINS]
     values = [domain_scores[d.key] for d in DOMAINS]
     st.plotly_chart(make_radar(labels, values, UI[lang]["results"]), use_container_width=True)
 
-    # Submit lock
+    # Submit lock + safeguard
     if not st.session_state["submitted"]:
-        st.info("Press Submit to store and lock results.")
-        if st.button(UI[lang]["submit"], use_container_width=True):
-            derived_json = {"domain_scores": {k: float(v) for k, v in domain_scores.items()}, "overall": float(overall)}
-            try:
-                db_participant_submit(token, lang, answers_json, profile_json, derived_json)
-                st.session_state["submitted"] = True
-                st.success(UI[lang]["submitted_ok"])
-                st.rerun()
-            except Exception as e:
-                st.error(f"Submission failed: {e}")
-                st.stop()
+        if read_only:
+            st.warning(UI[lang]["token_used_readonly"])
+        else:
+            st.info("Press Submit to store and lock results.")
+            if st.button(UI[lang]["submit"], use_container_width=True, disabled=read_only):
+                derived_json = {
+                    "domain_scores": {k: float(v) for k, v in domain_scores.items()},
+                    "overall": float(overall)
+                }
+                try:
+                    db_participant_submit(token, lang, answers_json, profile_json, derived_json)
+                    st.session_state["submitted"] = True
+                    st.success(UI[lang]["submitted_ok"])
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Submission failed: {e}")
+                    st.stop()
         st.stop()
 
     # Domain table
@@ -975,7 +983,7 @@ def participant_wizard():
     show["Risk"] = show["risk"].round(3)
     st.dataframe(show[["domain","Weight %","Avg (1–5)","Band","Risk"]], use_container_width=True, hide_index=True)
 
-    # Export PDF
+    # PDF export
     out_rows = []
     for q in QUESTIONS:
         out_rows.append({
@@ -989,9 +997,13 @@ def participant_wizard():
     out = pd.DataFrame(out_rows)
 
     pdf = build_participant_pdf(lang, df, float(overall), out, LEGACY_LOGO, STRATEGIZE_LOGO)
-    st.download_button(UI[lang]["download_pdf"], data=pdf,
-                       file_name="Legacy360_Report.pdf" if lang == "EN" else "Legacy360_Αναφορά.pdf",
-                       mime="application/pdf", use_container_width=True)
+    st.download_button(
+        UI[lang]["download_pdf"],
+        data=pdf,
+        file_name="Legacy360_Report.pdf" if lang == "EN" else "Legacy360_Αναφορά.pdf",
+        mime="application/pdf",
+        use_container_width=True
+    )
 
 
 # =========================================================
@@ -1002,4 +1014,3 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
-
