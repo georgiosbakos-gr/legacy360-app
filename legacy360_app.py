@@ -2,6 +2,9 @@
 # Legacy360° V1 — Streamlit single-file app
 # Participant wizard (token invites) + Admin dashboard (cases/invites/aggregation) + Premium PDFs
 # Supabase backend (Postgres + JSONB via RPC)
+#
+# IMPORTANT: This version NEVER crashes if fonts are missing.
+# It will fall back to default PDF fonts (Greek may render poorly) until DejaVu fonts are present.
 
 import os
 import json
@@ -31,10 +34,23 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 
 # =========================================================
-# CONFIG / SECRETS
+# APP CONFIG
 # =========================================================
 
+APP_VERSION = "2026-01-02-V1-FONTSAFE"
 QUESTIONNAIRE_VERSION = "v1"
+
+st.set_page_config(page_title="Legacy360°", layout="wide")
+
+params = st.query_params
+is_admin = str(params.get("admin", "")).strip().lower() in ("1", "true", "yes")
+token = str(params.get("token", "")).strip()
+debug_on = str(params.get("debug", "")).strip().lower() in ("1", "true", "yes")
+
+
+# =========================================================
+# SECRETS / ENV
+# =========================================================
 
 def _get_secret(name: str, required: bool = True) -> str:
     v = ""
@@ -58,56 +74,87 @@ def sha256_hex(s: str) -> str:
 
 
 # =========================================================
-# PDF FONTS (Greek-safe)
+# PATHS / ASSETS
+# =========================================================
+
+BASE_DIR = os.path.dirname(__file__)
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+LEGACY_LOGO = os.path.join(ASSETS_DIR, "legacy360.png")
+STRATEGIZE_LOGO = os.path.join(ASSETS_DIR, "strategize.png")
+
+# Fonts: primary path assets/fonts, fallback assets/text
+FONTS_DIR_PRIMARY = os.path.join(ASSETS_DIR, "fonts")
+FONTS_DIR_FALLBACK = os.path.join(ASSETS_DIR, "text")
+
+
+# Optional runtime debug (only when ?debug=1)
+if debug_on:
+    with st.sidebar.expander("🔧 Runtime Debug", expanded=True):
+        st.write("APP_VERSION:", APP_VERSION)
+        st.write("BASE_DIR:", BASE_DIR)
+        try:
+            st.write("ROOT listing:", os.listdir(BASE_DIR))
+        except Exception as e:
+            st.write("ROOT listing error:", e)
+
+        st.write("ASSETS_DIR exists:", os.path.exists(ASSETS_DIR))
+        if os.path.exists(ASSETS_DIR):
+            st.write("ASSETS listing:", os.listdir(ASSETS_DIR))
+
+        st.write("FONTS primary exists:", os.path.exists(FONTS_DIR_PRIMARY))
+        if os.path.exists(FONTS_DIR_PRIMARY):
+            st.write("FONTS primary listing:", os.listdir(FONTS_DIR_PRIMARY))
+
+        st.write("FONTS fallback exists:", os.path.exists(FONTS_DIR_FALLBACK))
+        if os.path.exists(FONTS_DIR_FALLBACK):
+            st.write("FONTS fallback listing:", os.listdir(FONTS_DIR_FALLBACK))
+
+
+# =========================================================
+# PDF FONTS (Greek-safe) — NEVER CRASHES
 # =========================================================
 
 def register_pdf_fonts():
     """
     Registers DejaVu fonts if available.
     Never crashes the app; falls back to default fonts if missing.
-    Also supports both assets/fonts and assets/text (legacy path).
+    Supports assets/fonts and assets/text.
     """
     if getattr(register_pdf_fonts, "_done", False):
         return
 
-    base = os.path.dirname(__file__)
-
-    # Support both possible folders (in case files ended up in assets/text)
-    candidate_dirs = [
-        os.path.join(base, "assets", "fonts"),
-        os.path.join(base, "assets", "text"),
-    ]
-
-    found_dir = None
+    candidate_dirs = [FONTS_DIR_PRIMARY, FONTS_DIR_FALLBACK]
     regular = None
     bold = None
+    found_dir = None
 
     for d in candidate_dirs:
         r = os.path.join(d, "DejaVuSans.ttf")
         b = os.path.join(d, "DejaVuSans-Bold.ttf")
         if os.path.exists(r) and os.path.exists(b):
-            found_dir = d
-            regular = r
-            bold = b
+            regular, bold, found_dir = r, b, d
             break
 
-    # Lightweight debug in sidebar (won't crash)
-    try:
-        st.sidebar.caption("PDF fonts:")
-        st.sidebar.write("Font dir used:", found_dir)
-        for d in candidate_dirs:
-            st.sidebar.write("Dir exists:", d, os.path.exists(d))
-            if os.path.exists(d):
-                st.sidebar.write("Files:", os.listdir(d))
-    except Exception:
-        pass
+    if debug_on:
+        try:
+            st.sidebar.caption("PDF fonts:")
+            st.sidebar.write("Found dir:", found_dir)
+            for d in candidate_dirs:
+                st.sidebar.write("Dir:", d, "exists:", os.path.exists(d))
+                if os.path.exists(d):
+                    st.sidebar.write("Files:", os.listdir(d))
+        except Exception:
+            pass
 
     if regular and bold:
-        pdfmetrics.registerFont(TTFont("DejaVu", regular))
-        pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
+        try:
+            pdfmetrics.registerFont(TTFont("DejaVu", regular))
+            pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
+        except Exception:
+            # If ReportLab fails, do not crash
+            pass
 
     register_pdf_fonts._done = True
-
 
 
 # =========================================================
@@ -391,10 +438,7 @@ def make_radar(labels: List[str], values: List[float], title: str):
 # =========================================================
 
 def _img_contain(path: str, max_w_mm: float, max_h_mm: float):
-    """
-    CSS-like 'contain': keep aspect ratio, fit into max_w x max_h box.
-    Avoids squeezing for square PNGs.
-    """
+    """Keep aspect ratio, fit into max_w x max_h box."""
     try:
         if not (path and os.path.exists(path)):
             return None
@@ -427,10 +471,14 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
     gold = colors.HexColor("#C7922B")
     grey = colors.HexColor("#6B7280")
 
-    base = ParagraphStyle("base", parent=styles["BodyText"], fontName="DejaVu", fontSize=10, leading=13)
-    small = ParagraphStyle("small", parent=base, fontName="DejaVu", fontSize=9, leading=12, textColor=grey)
-    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="DejaVu-Bold", fontSize=18, leading=22, textColor=navy, spaceAfter=8)
-    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="DejaVu-Bold", fontSize=12, leading=14, textColor=navy, spaceAfter=6)
+    # Prefer DejaVu if registered, else fallback to Helvetica
+    base_font = "DejaVu" if "DejaVu" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
+    bold_font = "DejaVu-Bold" if "DejaVu-Bold" in pdfmetrics.getRegisteredFontNames() else "Helvetica-Bold"
+
+    base = ParagraphStyle("base", parent=styles["BodyText"], fontName=base_font, fontSize=10, leading=13)
+    small = ParagraphStyle("small", parent=base, fontName=base_font, fontSize=9, leading=12, textColor=grey)
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName=bold_font, fontSize=18, leading=22, textColor=navy, spaceAfter=8)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName=bold_font, fontSize=12, leading=14, textColor=navy, spaceAfter=6)
 
     L = {
         "GR": {"report": "Αναφορά Αποτελεσμάτων", "date": "Ημερομηνία", "page": "Σελίδα",
@@ -447,19 +495,17 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
         canvas.setStrokeColor(gold)
         canvas.setLineWidth(1)
         canvas.line(doc_.leftMargin, 14*mm, w-doc_.rightMargin, 14*mm)
-        canvas.setFont("DejaVu", 8)
+        canvas.setFont(base_font, 8)
         canvas.setFillColor(grey)
         canvas.drawString(doc_.leftMargin, 9.5*mm, "Strategize — Beyond the Bottom Line")
         canvas.drawRightString(w-doc_.rightMargin, 9.5*mm, f"{L['page']} {canvas.getPageNumber()}")
         canvas.restoreState()
 
-    # Stable header: sizes designed for square PNGs
     legacy_img = _img_contain(legacy_logo_path, max_w_mm=62, max_h_mm=18)
     strat_img  = _img_contain(strategize_logo_path, max_w_mm=48, max_h_mm=18)
 
     story = []
 
-    # Cover header
     top = Table([[legacy_img or "", strat_img or ""]],
                 colWidths=[120*mm, 55*mm],
                 rowHeights=[20*mm])
@@ -475,8 +521,8 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
     story.append(top)
     story.append(Spacer(1, 14))
 
-    story.append(_p("<b>Legacy360°</b>", ParagraphStyle("ct", parent=h1, fontSize=24, leading=28)))
-    story.append(_p("Family Governance & Succession Roadmap", ParagraphStyle("cs", parent=h2, fontSize=13, leading=16)))
+    story.append(_p("<b>Legacy360°</b>", ParagraphStyle("ct", parent=h1, fontName=bold_font, fontSize=24, leading=28)))
+    story.append(_p("Family Governance & Succession Roadmap", ParagraphStyle("cs", parent=h2, fontName=bold_font, fontSize=13, leading=16)))
     story.append(Spacer(1, 6))
     story.append(_p(f"<font color='{gold.hexval()}'>a Strategize service</font>", small))
     story.append(Spacer(1, 14))
@@ -486,7 +532,6 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
     story.append(_p(f"{L['date']}: {datetime.now().strftime('%d/%m/%Y')}", base))
     story.append(PageBreak())
 
-    # Domain Summary table
     story.append(_p(L["summary"], h2))
 
     dd = df_domains.copy()
@@ -499,18 +544,18 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
 
     for _, r in dd.sort_values("risk", ascending=False).iterrows():
         rows.append([
-            _p(r["domain"], ParagraphStyle("td", parent=base, fontSize=9, leading=11)),
-            _p(f"{int(r['Weight%'])}%", ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
-            _p(f"{r['Avg']:.2f}", ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
-            _p(BAND_LABELS[lang][r["band"]], ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
-            _p(f"{r['Risk']:.3f}", ParagraphStyle("tn", parent=base, fontSize=9, leading=11)),
+            _p(r["domain"], ParagraphStyle("td", parent=base, fontName=base_font, fontSize=9, leading=11)),
+            _p(f"{int(r['Weight%'])}%", ParagraphStyle("tn", parent=base, fontName=base_font, fontSize=9, leading=11)),
+            _p(f"{r['Avg']:.2f}", ParagraphStyle("tn", parent=base, fontName=base_font, fontSize=9, leading=11)),
+            _p(BAND_LABELS[lang][r["band"]], ParagraphStyle("tn", parent=base, fontName=base_font, fontSize=9, leading=11)),
+            _p(f"{r['Risk']:.3f}", ParagraphStyle("tn", parent=base, fontName=base_font, fontSize=9, leading=11)),
         ])
 
     dom_tbl = Table(rows, colWidths=[90*mm, 18*mm, 18*mm, 28*mm, 21*mm], repeatRows=1)
     dom_tbl.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0),navy),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),
-        ("FONTNAME",(0,0),(-1,0),"DejaVu-Bold"),
+        ("FONTNAME",(0,0),(-1,0),bold_font),
         ("FONTSIZE",(0,0),(-1,0),9),
         ("VALIGN",(0,0),(-1,-1),"TOP"),
         ("ALIGN",(1,1),(-1,-1),"CENTER"),
@@ -533,17 +578,17 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
     qa_rows = [["ID", L["domain"], "Question", "Score"]]
     for _, rr in a.iterrows():
         qa_rows.append([
-            _p(str(rr["question_id"]), ParagraphStyle("qaid", parent=base, fontSize=8, leading=10)),
-            _p(str(rr["domain"]), ParagraphStyle("qad", parent=base, fontSize=8, leading=10)),
-            _p(str(rr["question"]), ParagraphStyle("qaq", parent=base, fontSize=8, leading=10)),
-            _p(str(rr["score"]), ParagraphStyle("qas", parent=base, fontSize=8, leading=10)),
+            _p(str(rr["question_id"]), ParagraphStyle("qaid", parent=base, fontName=base_font, fontSize=8, leading=10)),
+            _p(str(rr["domain"]), ParagraphStyle("qad", parent=base, fontName=base_font, fontSize=8, leading=10)),
+            _p(str(rr["question"]), ParagraphStyle("qaq", parent=base, fontName=base_font, fontSize=8, leading=10)),
+            _p(str(rr["score"]), ParagraphStyle("qas", parent=base, fontName=base_font, fontSize=8, leading=10)),
         ])
 
     qa_tbl = Table(qa_rows, colWidths=[14*mm, 42*mm, 100*mm, 15*mm], repeatRows=1)
     qa_tbl.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0),navy),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),
-        ("FONTNAME",(0,0),(-1,0),"DejaVu-Bold"),
+        ("FONTNAME",(0,0),(-1,0),bold_font),
         ("FONTSIZE",(0,0),(-1,0),9),
         ("GRID",(0,0),(-1,-1),0.25,colors.lightgrey),
         ("VALIGN",(0,0),(-1,-1),"TOP"),
@@ -573,9 +618,12 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
     gold = colors.HexColor("#C7922B")
     grey = colors.HexColor("#6B7280")
 
-    base = ParagraphStyle("base", parent=styles["BodyText"], fontName="DejaVu", fontSize=10, leading=13)
-    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="DejaVu-Bold", fontSize=18, leading=22, textColor=navy, spaceAfter=8)
-    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="DejaVu-Bold", fontSize=12, leading=14, textColor=navy, spaceAfter=6)
+    base_font = "DejaVu" if "DejaVu" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
+    bold_font = "DejaVu-Bold" if "DejaVu-Bold" in pdfmetrics.getRegisteredFontNames() else "Helvetica-Bold"
+
+    base = ParagraphStyle("base", parent=styles["BodyText"], fontName=base_font, fontSize=10, leading=13)
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName=bold_font, fontSize=18, leading=22, textColor=navy, spaceAfter=8)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName=bold_font, fontSize=12, leading=14, textColor=navy, spaceAfter=6)
 
     title = "Case Αναφορά — Family Alignment" if lang == "GR" else "Case Report — Family Alignment"
     today = datetime.now().strftime("%d/%m/%Y")
@@ -586,13 +634,12 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
         canvas.setStrokeColor(gold)
         canvas.setLineWidth(1)
         canvas.line(doc_.leftMargin, 14*mm, w-doc_.rightMargin, 14*mm)
-        canvas.setFont("DejaVu", 8)
+        canvas.setFont(base_font, 8)
         canvas.setFillColor(grey)
         canvas.drawString(doc_.leftMargin, 9.5*mm, "Strategize — Beyond the Bottom Line")
         canvas.drawRightString(w-doc_.rightMargin, 9.5*mm, f"{canvas.getPageNumber()}")
         canvas.restoreState()
 
-    # Same stable header logic
     legacy_img = _img_contain(legacy_logo_path, max_w_mm=62, max_h_mm=18)
     strat_img  = _img_contain(strategize_logo_path, max_w_mm=48, max_h_mm=18)
 
@@ -616,8 +663,8 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
     story.append(top)
     story.append(Spacer(1, 14))
 
-    story.append(_p("<b>Legacy360°</b>", ParagraphStyle("ct", parent=h1, fontSize=24, leading=28)))
-    story.append(_p(title, ParagraphStyle("cs", parent=h2, fontSize=13, leading=16)))
+    story.append(_p("<b>Legacy360°</b>", ParagraphStyle("ct", parent=h1, fontName=bold_font, fontSize=24, leading=28)))
+    story.append(_p(title, ParagraphStyle("cs", parent=h2, fontName=bold_font, fontSize=13, leading=16)))
     story.append(Spacer(1, 12))
 
     story.append(_p(f"<b>Company:</b> {company or '-'}", base))
@@ -632,23 +679,23 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
     n = agg.get("participants_n", 0)
 
     story.append(_p("Average Overall Index (0–100)" if lang == "EN" else "Μέσος Συνολικός Δείκτης (0–100)", h2))
-    story.append(_p(f"<b>{overall_avg:.1f}</b>", ParagraphStyle("big", parent=h1, fontSize=22, leading=26)))
+    story.append(_p(f"<b>{overall_avg:.1f}</b>", ParagraphStyle("big", parent=h1, fontName=bold_font, fontSize=22, leading=26)))
     story.append(_p(("Participants" if lang == "EN" else "Συμμετέχοντες") + f": <b>{n}</b>", base))
     story.append(Spacer(1, 10))
 
     rows = [["Domain" if lang == "EN" else "Ενότητα", "Avg" if lang == "EN" else "Μ.Ο.", "Std"]]
     for d in DOMAINS:
         rows.append([
-            _p(DOMAIN_LABELS[lang][d.key], ParagraphStyle("d", parent=base, fontSize=9, leading=11)),
-            _p(f"{agg['domain_avg'].get(d.key, float('nan')):.2f}", ParagraphStyle("n", parent=base, fontSize=9, leading=11)),
-            _p(f"{agg['domain_std'].get(d.key, 0.0):.2f}", ParagraphStyle("n", parent=base, fontSize=9, leading=11)),
+            _p(DOMAIN_LABELS[lang][d.key], ParagraphStyle("d", parent=base, fontName=base_font, fontSize=9, leading=11)),
+            _p(f"{agg['domain_avg'].get(d.key, float('nan')):.2f}", ParagraphStyle("n", parent=base, fontName=base_font, fontSize=9, leading=11)),
+            _p(f"{agg['domain_std'].get(d.key, 0.0):.2f}", ParagraphStyle("n", parent=base, fontName=base_font, fontSize=9, leading=11)),
         ])
 
     tbl = Table(rows, colWidths=[125*mm, 22*mm, 22*mm], repeatRows=1)
     tbl.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0),navy),
         ("TEXTCOLOR",(0,0),(-1,0),colors.white),
-        ("FONTNAME",(0,0),(-1,0),"DejaVu-Bold"),
+        ("FONTNAME",(0,0),(-1,0),bold_font),
         ("FONTSIZE",(0,0),(-1,0),9),
         ("GRID",(0,0),(-1,-1),0.3,colors.lightgrey),
         ("VALIGN",(0,0),(-1,-1),"TOP"),
@@ -664,7 +711,6 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
     story.append(Spacer(1, 14))
     story.append(_p("Interpretation & Alignment" if lang == "EN" else "Ερμηνεία & Ευθυγράμμιση", h2))
 
-    # Simple alignment narrative based on Std
     case_df = agg["case_df"].copy()
     high_var = case_df.sort_values("std", ascending=False).head(3)
     low_score = case_df.sort_values("avg_score", ascending=True).head(3)
@@ -694,7 +740,7 @@ def db_participant_validate_invite(raw_token: str) -> Dict[str, Any]:
     res = sb.rpc("validate_invite", {"p_token_hash": token_hash}).execute()
     if not res.data:
         return {"valid": False}
-    row = res.data[0]  # case_id, invite_id, participant_email, status
+    row = res.data[0]
     return {"valid": True, "token_hash": token_hash, **row}
 
 def db_participant_submit(raw_token: str, lang: str, answers_json: Dict[str, int], profile_json: Dict[str, Any], derived_json: Dict[str, Any]) -> Any:
@@ -751,68 +797,10 @@ def db_admin_get_submissions(case_id: str) -> List[Dict[str, Any]]:
 
 
 # =========================================================
-# STREAMLIT APP
+# STREAMLIT UI
 # =========================================================
 
-st.set_page_config(page_title="Legacy360°", layout="wide")
-BASE_DIR = os.path.dirname(__file__)
-
-with st.sidebar.expander("🔧 Runtime Debug (assets/fonts)", expanded=True):
-    st.write("BASE_DIR:", BASE_DIR)
-    st.write("ROOT:", os.listdir(BASE_DIR))
-
-    assets_dir = os.path.join(BASE_DIR, "assets")
-    fonts_dir = os.path.join(assets_dir, "fonts")
-
-    st.write("assets exists:", os.path.exists(assets_dir))
-    if os.path.exists(assets_dir):
-        st.write("assets listing:", os.listdir(assets_dir))
-
-    st.write("fonts exists:", os.path.exists(fonts_dir))
-    if os.path.exists(fonts_dir):
-        st.write("fonts listing:", os.listdir(fonts_dir))
-
-    st.write("DejaVuSans.ttf:", os.path.exists(os.path.join(fonts_dir, "DejaVuSans.ttf")))
-    st.write("DejaVuSans-Bold.ttf:", os.path.exists(os.path.join(fonts_dir, "DejaVuSans-Bold.ttf")))
-
-import os
-
-BASE_DIR = os.path.dirname(__file__)
-
-st.sidebar.markdown("### 🔧 Runtime Filesystem Debug")
-st.sidebar.write("BASE_DIR:", BASE_DIR)
-st.sidebar.write("ROOT listing:", os.listdir(BASE_DIR))
-
-assets_dir = os.path.join(BASE_DIR, "assets")
-fonts_dir = os.path.join(assets_dir, "fonts")
-
-st.sidebar.write("assets exists:", os.path.exists(assets_dir))
-if os.path.exists(assets_dir):
-    st.sidebar.write("assets listing:", os.listdir(assets_dir))
-
-st.sidebar.write("fonts exists:", os.path.exists(fonts_dir))
-if os.path.exists(fonts_dir):
-    st.sidebar.write("fonts listing:", os.listdir(fonts_dir))
-
-st.sidebar.write("DejaVuSans.ttf:", os.path.exists(os.path.join(fonts_dir, "DejaVuSans.ttf")))
-st.sidebar.write("DejaVuSans-Bold.ttf:", os.path.exists(os.path.join(fonts_dir, "DejaVuSans-Bold.ttf")))
-
-params = st.query_params
-is_admin = str(params.get("admin", "")).strip() in ("1", "true", "yes")
-token = str(params.get("token", "")).strip()
-
 lang = st.sidebar.radio("Γλώσσα / Language", ["GR", "EN"], index=0)
-
-BASE_DIR = os.path.dirname(__file__)
-st.sidebar.markdown("### 🔧 Font Debug")
-st.sidebar.write("BASE_DIR:", BASE_DIR)
-st.sidebar.write("assets exists:", os.path.exists(os.path.join(BASE_DIR, "assets")))
-st.sidebar.write("fonts dir exists:", os.path.exists(os.path.join(BASE_DIR, "assets", "fonts")))
-st.sidebar.write("DejaVuSans.ttf:", os.path.exists(os.path.join(BASE_DIR, "assets", "fonts", "DejaVuSans.ttf")))
-st.sidebar.write("DejaVuSans-Bold.ttf:", os.path.exists(os.path.join(BASE_DIR, "assets", "fonts", "DejaVuSans-Bold.ttf")))
-ASSETS_DIR = os.path.join(BASE_DIR, "assets")
-LEGACY_LOGO = os.path.join(ASSETS_DIR, "legacy360.png")
-STRATEGIZE_LOGO = os.path.join(ASSETS_DIR, "strategize.png")
 
 def header():
     left, right = st.columns([0.68, 0.32], vertical_alignment="center")
@@ -824,6 +812,7 @@ def header():
     with right:
         if os.path.exists(STRATEGIZE_LOGO):
             st.image(STRATEGIZE_LOGO, width=240)
+    st.caption(f"Build: {APP_VERSION}")
     st.markdown("<hr style='border:1px solid #C7922B; margin-top:10px; margin-bottom:10px;'>", unsafe_allow_html=True)
 
 
@@ -873,12 +862,18 @@ def admin_dashboard():
         email = st.text_input("Participant email")
         expires_days = st.number_input("Expires in days", min_value=1, max_value=60, value=14)
         max_uses = st.number_input("Max uses", min_value=1, max_value=5, value=1)
-        base_url = st.text_input("Participant app base URL (e.g., https://xxx.streamlit.app)", value="")
+
+        default_base = _get_secret("APP_BASE_URL", required=False) or ""
+        base_url = st.text_input("Participant app base URL (e.g., https://xxx.streamlit.app)", value=default_base)
 
         if st.button("Generate Invite", use_container_width=True, disabled=not(case_id.strip() and email.strip())):
             inv = db_admin_create_invite(case_id.strip(), email.strip(), int(expires_days), int(max_uses))
-            link = f"{base_url.strip().rstrip('/')}/?token={inv['raw_token']}" if base_url.strip() else ""
-            st.code(f"Invite ID: {inv['invite_id']}\nToken (raw): {inv['raw_token']}\nLink: {link}".strip())
+            manual_link = f"{base_url.strip().rstrip('/')}/?token={inv['raw_token']}" if base_url.strip() else f"/?token={inv['raw_token']}"
+            st.code(
+                f"Invite ID: {inv['invite_id']}\n"
+                f"Token (raw): {inv['raw_token']}\n"
+                f"Link: {manual_link}"
+            )
 
     with tabs[3]:
         case_id = st.text_input("Case ID to aggregate (uuid)", key="case_id_agg")
@@ -939,7 +934,7 @@ def participant_wizard():
         st.stop()
 
     token_status = str(v.get("status") or "").upper()
-    read_only = (token_status == "USED")  # after submit: allow view/download, block new submit
+    read_only = (token_status == "USED")
 
     case_id = v.get("case_id")
     participant_email = v.get("participant_email") or ""
@@ -993,16 +988,15 @@ def participant_wizard():
 
     dq = domain_questions_map()
 
-    # Sidebar sections status (restores "left menu" feel)
+    # Sidebar sections status
     with st.sidebar:
         st.markdown("### 🧭 Sections")
         for i, d in enumerate(DOMAINS):
-            dom_key = d.key
-            missing_dom = [qid for qid in dq[dom_key] if st.session_state["answers"][qid] is None]
+            missing_dom = [qid for qid in dq[d.key] if st.session_state["answers"][qid] is None]
             done = (len(missing_dom) == 0)
             marker = "✅" if done else "⬜"
             current = "➡️ " if i == st.session_state["step"] else ""
-            st.markdown(f"{current}{marker} {DOMAIN_LABELS[lang][dom_key]}")
+            st.markdown(f"{current}{marker} {DOMAIN_LABELS[lang][d.key]}")
 
     # Wizard pages
     if st.session_state["step"] < len(DOMAINS):
@@ -1100,7 +1094,7 @@ def participant_wizard():
     show["Risk"] = show["risk"].round(3)
     st.dataframe(show[["domain","Weight %","Avg (1–5)","Band","Risk"]], use_container_width=True, hide_index=True)
 
-    # PDF export
+    # PDF export (never crash even if fonts missing)
     out_rows = []
     for q in QUESTIONS:
         out_rows.append({
@@ -1131,7 +1125,3 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
-
-
-
-
