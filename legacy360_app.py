@@ -733,6 +733,12 @@ token = str(params.get("token", "")).strip()
 lang = st.sidebar.radio("Γλώσσα / Language", ["GR", "EN"], index=0)
 
 BASE_DIR = os.path.dirname(__file__)
+st.sidebar.markdown("### 🔧 Font Debug")
+st.sidebar.write("BASE_DIR:", BASE_DIR)
+st.sidebar.write("assets exists:", os.path.exists(os.path.join(BASE_DIR, "assets")))
+st.sidebar.write("fonts dir exists:", os.path.exists(os.path.join(BASE_DIR, "assets", "fonts")))
+st.sidebar.write("DejaVuSans.ttf:", os.path.exists(os.path.join(BASE_DIR, "assets", "fonts", "DejaVuSans.ttf")))
+st.sidebar.write("DejaVuSans-Bold.ttf:", os.path.exists(os.path.join(BASE_DIR, "assets", "fonts", "DejaVuSans-Bold.ttf")))
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 LEGACY_LOGO = os.path.join(ASSETS_DIR, "legacy360.png")
 STRATEGIZE_LOGO = os.path.join(ASSETS_DIR, "strategize.png")
@@ -1054,3 +1060,4 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
+
