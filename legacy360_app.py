@@ -725,6 +725,27 @@ def db_admin_get_submissions(case_id: str) -> List[Dict[str, Any]]:
 # =========================================================
 
 st.set_page_config(page_title="Legacy360°", layout="wide")
+import os
+
+BASE_DIR = os.path.dirname(__file__)
+
+st.sidebar.markdown("### 🔧 Runtime Filesystem Debug")
+st.sidebar.write("BASE_DIR:", BASE_DIR)
+st.sidebar.write("ROOT listing:", os.listdir(BASE_DIR))
+
+assets_dir = os.path.join(BASE_DIR, "assets")
+fonts_dir = os.path.join(assets_dir, "fonts")
+
+st.sidebar.write("assets exists:", os.path.exists(assets_dir))
+if os.path.exists(assets_dir):
+    st.sidebar.write("assets listing:", os.listdir(assets_dir))
+
+st.sidebar.write("fonts exists:", os.path.exists(fonts_dir))
+if os.path.exists(fonts_dir):
+    st.sidebar.write("fonts listing:", os.listdir(fonts_dir))
+
+st.sidebar.write("DejaVuSans.ttf:", os.path.exists(os.path.join(fonts_dir, "DejaVuSans.ttf")))
+st.sidebar.write("DejaVuSans-Bold.ttf:", os.path.exists(os.path.join(fonts_dir, "DejaVuSans-Bold.ttf")))
 
 params = st.query_params
 is_admin = str(params.get("admin", "")).strip() in ("1", "true", "yes")
@@ -1060,4 +1081,5 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
+
 
