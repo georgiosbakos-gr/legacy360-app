@@ -62,22 +62,52 @@ def sha256_hex(s: str) -> str:
 # =========================================================
 
 def register_pdf_fonts():
+    """
+    Registers DejaVu fonts if available.
+    Never crashes the app; falls back to default fonts if missing.
+    Also supports both assets/fonts and assets/text (legacy path).
+    """
     if getattr(register_pdf_fonts, "_done", False):
         return
 
     base = os.path.dirname(__file__)
-    font_dir = os.path.join(base, "assets", "fonts")
-    regular = os.path.join(font_dir, "DejaVuSans.ttf")
-    bold = os.path.join(font_dir, "DejaVuSans-Bold.ttf")
 
-    if not (os.path.exists(regular) and os.path.exists(bold)):
-        raise RuntimeError(
-            "Missing fonts. Add assets/fonts/DejaVuSans.ttf and assets/fonts/DejaVuSans-Bold.ttf"
-        )
+    # Support both possible folders (in case files ended up in assets/text)
+    candidate_dirs = [
+        os.path.join(base, "assets", "fonts"),
+        os.path.join(base, "assets", "text"),
+    ]
 
-    pdfmetrics.registerFont(TTFont("DejaVu", regular))
-    pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
+    found_dir = None
+    regular = None
+    bold = None
+
+    for d in candidate_dirs:
+        r = os.path.join(d, "DejaVuSans.ttf")
+        b = os.path.join(d, "DejaVuSans-Bold.ttf")
+        if os.path.exists(r) and os.path.exists(b):
+            found_dir = d
+            regular = r
+            bold = b
+            break
+
+    # Lightweight debug in sidebar (won't crash)
+    try:
+        st.sidebar.caption("PDF fonts:")
+        st.sidebar.write("Font dir used:", found_dir)
+        for d in candidate_dirs:
+            st.sidebar.write("Dir exists:", d, os.path.exists(d))
+            if os.path.exists(d):
+                st.sidebar.write("Files:", os.listdir(d))
+    except Exception:
+        pass
+
+    if regular and bold:
+        pdfmetrics.registerFont(TTFont("DejaVu", regular))
+        pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
+
     register_pdf_fonts._done = True
+
 
 
 # =========================================================
@@ -1101,6 +1131,7 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
+
 
 
 
