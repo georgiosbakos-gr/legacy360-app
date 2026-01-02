@@ -725,6 +725,26 @@ def db_admin_get_submissions(case_id: str) -> List[Dict[str, Any]]:
 # =========================================================
 
 st.set_page_config(page_title="Legacy360°", layout="wide")
+BASE_DIR = os.path.dirname(__file__)
+
+with st.sidebar.expander("🔧 Runtime Debug (assets/fonts)", expanded=True):
+    st.write("BASE_DIR:", BASE_DIR)
+    st.write("ROOT:", os.listdir(BASE_DIR))
+
+    assets_dir = os.path.join(BASE_DIR, "assets")
+    fonts_dir = os.path.join(assets_dir, "fonts")
+
+    st.write("assets exists:", os.path.exists(assets_dir))
+    if os.path.exists(assets_dir):
+        st.write("assets listing:", os.listdir(assets_dir))
+
+    st.write("fonts exists:", os.path.exists(fonts_dir))
+    if os.path.exists(fonts_dir):
+        st.write("fonts listing:", os.listdir(fonts_dir))
+
+    st.write("DejaVuSans.ttf:", os.path.exists(os.path.join(fonts_dir, "DejaVuSans.ttf")))
+    st.write("DejaVuSans-Bold.ttf:", os.path.exists(os.path.join(fonts_dir, "DejaVuSans-Bold.ttf")))
+
 import os
 
 BASE_DIR = os.path.dirname(__file__)
@@ -1081,5 +1101,6 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
+
 
 
