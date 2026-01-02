@@ -4,7 +4,7 @@
 # Supabase backend (Postgres + JSONB via RPC)
 #
 # IMPORTANT: This version NEVER crashes if fonts are missing.
-# It will fall back to default PDF fonts (Greek may render poorly) until DejaVu fonts are present.
+# It falls back to default PDF fonts until DejaVu fonts are present.
 
 import os
 import json
@@ -13,7 +13,7 @@ import secrets
 from io import BytesIO
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 
 import numpy as np
 import pandas as pd
@@ -37,7 +37,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 # APP CONFIG
 # =========================================================
 
-APP_VERSION = "2026-01-02-V1-FONTSAFE"
+APP_VERSION = "2026-01-02-V1-FONTSAFE-INSIGHTS"
 QUESTIONNAIRE_VERSION = "v1"
 
 st.set_page_config(page_title="Legacy360°", layout="wide")
@@ -264,6 +264,86 @@ QUESTIONS: List[Question] = [
 
 
 # =========================================================
+# DISCUSSION QUESTIONS (RED/AMBER)
+# =========================================================
+
+DISCUSSION_QS: Dict[str, Dict[str, List[str]]] = {
+    "corp_gov": {
+        "EN": [
+            "Which decisions are unclear today (Board vs Management vs Owners) and where do conflicts typically appear?",
+            "What decisions currently happen informally, and what would ‘good’ escalation and documentation look like?",
+            "If we had to define 5–7 non-negotiable governance rules for the next 12 months, what would they be?"
+        ],
+        "GR": [
+            "Ποιες αποφάσεις είναι σήμερα ασαφείς (Δ.Σ. vs Διοίκηση vs Μέτοχοι) και πού εμφανίζονται συγκρούσεις;",
+            "Ποιες αποφάσεις λαμβάνονται άτυπα και πώς θα έμοιαζε ένας «καλός» μηχανισμός κλιμάκωσης/τεκμηρίωσης;",
+            "Αν ορίζαμε 5–7 μη διαπραγματεύσιμους κανόνες διακυβέρνησης για 12 μήνες, ποιοι θα ήταν;"
+        ],
+    },
+    "family_gov": {
+        "EN": [
+            "Where do family expectations diverge (dividends, employment, authority, succession) and how is that managed today?",
+            "What would a ‘minimum viable’ family governance forum look like (agenda, cadence, participants, decisions)?",
+            "Which family policies should be written first to reduce friction (employment, transfers, dividends, conflict resolution)?"
+        ],
+        "GR": [
+            "Πού αποκλίνουν οι προσδοκίες της οικογένειας (μερίσματα, απασχόληση, εξουσία, διαδοχή) και πώς το διαχειρίζεστε σήμερα;",
+            "Πώς θα έμοιαζε ένα «ελάχιστο βιώσιμο» forum οικογενειακής διακυβέρνησης (ατζέντα, ρυθμός, συμμετέχοντες, αποφάσεις);",
+            "Ποιες οικογενειακές πολιτικές πρέπει να γραφτούν πρώτες για να μειωθούν οι τριβές (απασχόληση, μεταβιβάσεις, μερίσματα, επίλυση διαφορών);"
+        ],
+    },
+    "family_roles": {
+        "EN": [
+            "Which family roles create ambiguity today (operational, governance, ownership) and what ‘role clarity’ would solve it?",
+            "Do we have objective entry/progression/exit criteria for family members — and are they applied consistently?",
+            "What would ‘fair and equal standards’ look like between family and non-family executives?"
+        ],
+        "GR": [
+            "Ποιοι οικογενειακοί ρόλοι δημιουργούν σήμερα ασάφεια (λειτουργικοί, διακυβέρνησης, ιδιοκτησίας) και τι θα την έλυνε;",
+            "Υπάρχουν αντικειμενικά κριτήρια εισόδου/εξέλιξης/εξόδου για μέλη οικογένειας — και εφαρμόζονται με συνέπεια;",
+            "Πώς ορίζεται στην πράξη «ίδιο μέτρο και σταθμό» μεταξύ οικογενειακών και μη οικογενειακών στελεχών;"
+        ],
+    },
+    "strategy": {
+        "EN": [
+            "Is there one shared strategic narrative — and do leaders agree on the top 3 priorities for the next 12 months?",
+            "Where are trade-offs unclear (growth vs profitability vs family liquidity vs continuity) and who decides them?",
+            "What would a simple execution system look like (OKRs/KPIs, owners, cadence, review rhythm)?"
+        ],
+        "GR": [
+            "Υπάρχει κοινό στρατηγικό αφήγημα — και συμφωνούν οι ηγέτες στις 3 κορυφαίες προτεραιότητες για 12 μήνες;",
+            "Ποιες ισορροπίες είναι ασαφείς (ανάπτυξη vs κερδοφορία vs ρευστότητα οικογένειας vs συνέχεια) και ποιος αποφασίζει;",
+            "Πώς θα έμοιαζε ένα απλό σύστημα εκτέλεσης (OKRs/KPIs, ιδιοκτήτες, ρυθμός, ανασκοπήσεις);"
+        ],
+    },
+    "fin_perf": {
+        "EN": [
+            "Which KPIs actually drive decisions today — and which are ‘nice to have’ but unused?",
+            "What information is missing (timing, accuracy, segmentation) that prevents confident decisions?",
+            "How do we ensure performance reviews lead to actions (owners, deadlines, accountability), not just reporting?"
+        ],
+        "GR": [
+            "Ποια KPIs οδηγούν πραγματικά αποφάσεις σήμερα — και ποια είναι «nice to have» αλλά δεν χρησιμοποιούνται;",
+            "Ποια πληροφόρηση λείπει (χρονισμός, ακρίβεια, ανάλυση) και δεν επιτρέπει σίγουρες αποφάσεις;",
+            "Πώς διασφαλίζουμε ότι οι ανασκοπήσεις απόδοσης οδηγούν σε ενέργειες (ιδιοκτήτες, deadlines, λογοδοσία) και όχι μόνο σε reporting;"
+        ],
+    },
+    "sust_cont": {
+        "EN": [
+            "What are the 2–3 highest continuity risks (succession, dependency, governance, talent) and how are they mitigated?",
+            "Is succession treated as a plan (roles, timelines, readiness) or as an event — and what needs to change?",
+            "How will leadership and next-gen development be measured and reviewed over the next 12–24 months?"
+        ],
+        "GR": [
+            "Ποιοι είναι οι 2–3 μεγαλύτεροι κίνδυνοι συνέχειας (διαδοχή, εξάρτηση, διακυβέρνηση, ταλέντο) και πώς μετριάζονται;",
+            "Η διαδοχή αντιμετωπίζεται ως σχέδιο (ρόλοι, χρονοδιάγραμμα, ετοιμότητα) ή ως γεγονός — και τι πρέπει να αλλάξει;",
+            "Πώς θα μετρηθεί και θα ανασκοπείται η ανάπτυξη ηγεσίας και next-gen στους επόμενους 12–24 μήνες;"
+        ],
+    },
+}
+
+
+# =========================================================
 # UI COPY
 # =========================================================
 
@@ -415,6 +495,151 @@ def aggregate_case(lang: str, submissions: List[Dict[str, Any]]) -> Dict[str, An
 
 
 # =========================================================
+# INSIGHTS / NEXT STEPS / ROADMAP
+# =========================================================
+
+CONTACT_EMAIL = "gbakos@strategize.gr"
+CONTACT_WEB = "strategize.gr"
+
+def build_insights_next_steps_and_questions(lang: str, df_domains: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Builds:
+      - Key insights
+      - Implications for discussion
+      - Recommended next steps
+      - CTA (with contact)
+      - Domain-specific discussion questions for RED/AMBER domains
+      - Roadmap (0-30 / 30-90 / 90-180 days)
+    """
+    df = df_domains.copy()
+
+    red_cnt = int((df["band"] == "RED").sum())
+    amber_cnt = int((df["band"] == "AMBER").sum())
+    green_cnt = int((df["band"] == "GREEN").sum())
+
+    top_risk = df.sort_values("risk", ascending=False).head(3)["domain"].tolist()
+    low_score = df.sort_values("avg_score", ascending=True).head(3)["domain"].tolist()
+
+    # Discussion questions for RED/AMBER only (up to 3 domains)
+    ra = df[df["band"].isin(["RED", "AMBER"])].sort_values(["band", "risk"], ascending=[True, False])  # RED first then AMBER (alphabetically would not help)
+    # Better ordering: RED first, higher risk first
+    ra = ra.assign(_band_rank=ra["band"].map({"RED": 0, "AMBER": 1})).sort_values(["_band_rank", "risk"], ascending=[True, False])
+    ra = ra.drop(columns=["_band_rank"])
+    ra_domains = ra.head(3)[["domain_key", "domain", "band", "avg_score"]].to_dict("records")
+
+    dq_blocks = []
+    for r in ra_domains:
+        dom_key = r["domain_key"]
+        qs = (DISCUSSION_QS.get(dom_key, {}) or {}).get(lang, [])
+        dq_blocks.append({
+            "domain_key": dom_key,
+            "domain": r["domain"],
+            "band": r["band"],
+            "avg_score": float(r["avg_score"]),
+            "questions": qs[:3]
+        })
+
+    # Roadmap cards
+    if lang == "EN":
+        headline = "Interpretation & What this suggests"
+        key_insights = [
+            f"Maturity profile: {green_cnt} Green / {amber_cnt} Amber / {red_cnt} Red domains.",
+            f"Top priority areas (highest risk): {', '.join(top_risk)}.",
+            f"Lowest-scoring areas: {', '.join(low_score)}.",
+        ]
+        implications = [
+            "Lower maturity usually shifts decisions to informal power dynamics, creating friction and inconsistent execution.",
+            "Misalignment across family roles and governance typically delays succession and amplifies execution risk.",
+            "Improving clarity and accountability tends to accelerate delivery and reduce the cost of conflict.",
+        ]
+        next_steps = [
+            "Validate the dashboard in a short alignment workshop (60–90 min) with key stakeholders.",
+            "Deep-dive the top 2–3 domains and convert findings into a prioritised roadmap (initiatives, owners, timeline).",
+            "Define quick wins (0–30 days) and structural moves (30–120 days) to stabilise governance and execution cadence.",
+        ]
+        cta = [
+            "How Strategize can help:",
+            "• Facilitate the alignment session and translate the assessment into a decision-grade action plan.",
+            "• Design governance (Family Council / shareholder rules / Board advisory), role clarity and a succession roadmap.",
+            "• Support implementation with templates, coaching and cadence (KPIs, meeting rhythm, accountability).",
+            f"Contact: {CONTACT_EMAIL} | {CONTACT_WEB}",
+            "If you would like, request a 20’ review call to interpret the results and agree the next best steps."
+        ]
+        roadmap = [
+            ("0–30 days", [
+                "Confirm priorities and scope with a short alignment workshop.",
+                "Agree 5–7 governance rules (decision rights, escalation, meeting cadence).",
+                "Identify 3 quick wins to reduce friction and improve execution clarity."
+            ]),
+            ("30–90 days", [
+                "Create the Governance & Succession roadmap with owners and timelines.",
+                "Define family policies (employment/dividends/transfers) where needed.",
+                "Establish KPI cadence and a monthly review rhythm."
+            ]),
+            ("90–180 days", [
+                "Implement structural governance (Family Council / Advisory Board / Board routines).",
+                "Roll out role clarity, performance standards and succession readiness milestones.",
+                "Measure adoption and embed continuous improvement."
+            ]),
+        ]
+        dq_title = "Discussion questions (for RED/AMBER domains)"
+    else:
+        headline = "Ερμηνεία & Τι υποδηλώνουν τα αποτελέσματα"
+        key_insights = [
+            f"Προφίλ ωριμότητας: {green_cnt} Πράσινες / {amber_cnt} Κίτρινες / {red_cnt} Κόκκινες ενότητες.",
+            f"Κορυφαίες προτεραιότητες (υψηλότερος κίνδυνος): {', '.join(top_risk)}.",
+            f"Χαμηλότερες βαθμολογίες: {', '.join(low_score)}.",
+        ]
+        implications = [
+            "Η χαμηλότερη ωριμότητα συχνά μεταφέρει αποφάσεις σε άτυπες ισορροπίες, με τριβές και ασυνέπεια στην εκτέλεση.",
+            "Η ασυμφωνία ρόλων/διακυβέρνησης τείνει να καθυστερεί τη διαδοχή και να αυξάνει τον κίνδυνο υλοποίησης.",
+            "Η ενίσχυση σαφήνειας και λογοδοσίας επιταχύνει την υλοποίηση και μειώνει το κόστος σύγκρουσης.",
+        ]
+        next_steps = [
+            "Επιβεβαίωση του dashboard σε σύντομο workshop ευθυγράμμισης (60–90’) με τους βασικούς συμμετέχοντες.",
+            "Εμβάθυνση στις 2–3 ενότητες προτεραιότητας και μετατροπή σε roadmap (πρωτοβουλίες, ιδιοκτήτες, χρονοδιάγραμμα).",
+            "Ορισμός quick wins (0–30 ημέρες) και δομικών ενεργειών (30–120 ημέρες) για σταθεροποίηση διακυβέρνησης και cadence εκτέλεσης.",
+        ]
+        cta = [
+            "Πώς μπορεί να βοηθήσει η Strategize:",
+            "• Διευκόλυνση συνεδρίας ευθυγράμμισης και μετατροπή των ευρημάτων σε action plan αποφάσεων.",
+            "• Σχεδιασμός διακυβέρνησης (Family Council / κανόνες μετόχων / Board advisory), ρόλοι και roadmap διαδοχής.",
+            "• Υποστήριξη υλοποίησης με templates, coaching και cadence (KPIs, ρυθμός συναντήσεων, λογοδοσία).",
+            f"Επικοινωνία: {CONTACT_EMAIL} | {CONTACT_WEB}",
+            "Αν θέλετε, ζητήστε ένα σύντομο 20’ review call για να ερμηνεύσουμε τα αποτελέσματα και να συμφωνήσουμε τα επόμενα βήματα."
+        ]
+        roadmap = [
+            ("0–30 ημέρες", [
+                "Επιβεβαίωση προτεραιοτήτων και scope με σύντομο workshop ευθυγράμμισης.",
+                "Συμφωνία σε 5–7 κανόνες διακυβέρνησης (decision rights, escalation, cadence συναντήσεων).",
+                "Ορισμός 3 quick wins για μείωση τριβών και βελτίωση σαφήνειας εκτέλεσης."
+            ]),
+            ("30–90 ημέρες", [
+                "Δημιουργία Governance & Succession roadmap με ιδιοκτήτες και χρονοδιαγράμματα.",
+                "Ορισμός οικογενειακών πολιτικών (απασχόληση/μερίσματα/μεταβιβάσεις) όπου απαιτείται.",
+                "Θέσπιση cadence KPIs και μηνιαίου ρυθμού ανασκοπήσεων."
+            ]),
+            ("90–180 ημέρες", [
+                "Υλοποίηση δομικής διακυβέρνησης (Family Council / Advisory Board / ρουτίνες Δ.Σ.).",
+                "Εφαρμογή role clarity, standards απόδοσης και milestones ετοιμότητας διαδοχής.",
+                "Μέτρηση υιοθέτησης και ενσωμάτωση συνεχούς βελτίωσης."
+            ]),
+        ]
+        dq_title = "Ερωτήσεις συζήτησης (για Κόκκινες/Κίτρινες ενότητες)"
+
+    return {
+        "headline": headline,
+        "key_insights": key_insights,
+        "implications": implications,
+        "next_steps": next_steps,
+        "cta": cta,
+        "dq_title": dq_title,
+        "dq_blocks": dq_blocks,
+        "roadmap": roadmap,
+    }
+
+
+# =========================================================
 # CHARTS
 # =========================================================
 
@@ -459,8 +684,14 @@ def _p(text: str, style: ParagraphStyle) -> Paragraph:
     return Paragraph(text.replace("\n", "<br/>"), style)
 
 
-def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: float,
-                          answers_df: pd.DataFrame, legacy_logo_path: str, strategize_logo_path: str) -> bytes:
+def build_participant_pdf(
+    lang: str,
+    df_domains: pd.DataFrame,
+    overall_0_100: float,
+    answers_df: pd.DataFrame,
+    legacy_logo_path: str,
+    strategize_logo_path: str
+) -> bytes:
     register_pdf_fonts()
 
     buf = BytesIO()
@@ -471,7 +702,6 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
     gold = colors.HexColor("#C7922B")
     grey = colors.HexColor("#6B7280")
 
-    # Prefer DejaVu if registered, else fallback to Helvetica
     base_font = "DejaVu" if "DejaVu" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
     bold_font = "DejaVu-Bold" if "DejaVu-Bold" in pdfmetrics.getRegisteredFontNames() else "Helvetica-Bold"
 
@@ -483,10 +713,12 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
     L = {
         "GR": {"report": "Αναφορά Αποτελεσμάτων", "date": "Ημερομηνία", "page": "Σελίδα",
                "summary": "Σύνοψη ανά Ενότητα", "domain": "Ενότητα", "weight": "Βάρος", "score": "Βαθμός",
-               "status": "Κατάσταση", "risk": "Κίνδυνος", "appendix": "Παράρτημα: Απαντήσεις"},
+               "status": "Κατάσταση", "risk": "Κίνδυνος", "appendix": "Παράρτημα: Απαντήσεις",
+               "insights": "Ερμηνεία & Προτεινόμενα Βήματα", "dq": "Ερωτήσεις Συζήτησης", "roadmap": "Roadmap 0–180 Ημερών"},
         "EN": {"report": "Results Report", "date": "Date", "page": "Page",
                "summary": "Domain Summary", "domain": "Domain", "weight": "Weight", "score": "Score",
-               "status": "Status", "risk": "Risk", "appendix": "Appendix: Responses"},
+               "status": "Status", "risk": "Risk", "appendix": "Appendix: Responses",
+               "insights": "Interpretation & Recommended Steps", "dq": "Discussion Questions", "roadmap": "0–180 Day Roadmap"},
     }[lang]
 
     def footer(canvas, doc_):
@@ -568,6 +800,62 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
     ]))
     story.append(dom_tbl)
 
+    # Insights + Discussion Questions + Roadmap
+    ins = build_insights_next_steps_and_questions(lang, df_domains)
+
+    story.append(Spacer(1, 12))
+    story.append(_p(L["insights"], h2))
+
+    def bullets(items: List[str]) -> str:
+        return "<br/>".join([f"• {i}" for i in items])
+
+    story.append(_p("<b>" + ("Key insights" if lang=="EN" else "Κύρια συμπεράσματα") + "</b><br/>" + bullets(ins["key_insights"]), base))
+    story.append(Spacer(1, 6))
+    story.append(_p("<b>" + ("Implications for discussion" if lang=="EN" else "Επιπτώσεις προς συζήτηση") + "</b><br/>" + bullets(ins["implications"]), base))
+    story.append(Spacer(1, 6))
+    story.append(_p("<b>" + ("Recommended next steps" if lang=="EN" else "Προτεινόμενα επόμενα βήματα") + "</b><br/>" + bullets(ins["next_steps"]), base))
+    story.append(Spacer(1, 6))
+    story.append(_p("<b>" + ("Next Actions & Recommendations" if lang=="EN" else "Σύνοψη Επόμενων Ενεργειών & Προτάσεων") + "</b><br/>" + "<br/>".join(ins["cta"]), base))
+
+    # Discussion questions (for RED/AMBER)
+    dq_blocks = ins.get("dq_blocks") or []
+    if dq_blocks:
+        story.append(Spacer(1, 10))
+        story.append(_p(L["dq"], h2))
+        for b in dq_blocks:
+            dom_line = f"<b>{b['domain']}</b> — {BAND_LABELS[lang][b['band']]} ({b['avg_score']:.2f}/5)"
+            story.append(_p(dom_line, ParagraphStyle("dql", parent=base, fontName=bold_font, fontSize=10, leading=13, textColor=colors.black)))
+            story.append(_p(bullets(b["questions"]), base))
+            story.append(Spacer(1, 6))
+
+    # Roadmap card table (0-30 / 30-90 / 90-180)
+    story.append(Spacer(1, 10))
+    story.append(_p(L["roadmap"], h2))
+
+    roadmap_rows = [[
+        _p("<b>" + ("Timeframe" if lang=="EN" else "Χρονικός Ορίζοντας") + "</b>", ParagraphStyle("rh", parent=base, fontName=bold_font, fontSize=9, leading=11, textColor=colors.white)),
+        _p("<b>" + ("Focus & actions" if lang=="EN" else "Εστίαση & ενέργειες") + "</b>", ParagraphStyle("rh2", parent=base, fontName=bold_font, fontSize=9, leading=11, textColor=colors.white)),
+    ]]
+    for tf, items in ins["roadmap"]:
+        roadmap_rows.append([
+            _p(f"<b>{tf}</b>", ParagraphStyle("rtf", parent=base, fontName=bold_font, fontSize=9, leading=11)),
+            _p(bullets(items), ParagraphStyle("ract", parent=base, fontName=base_font, fontSize=9, leading=12)),
+        ])
+
+    rm_tbl = Table(roadmap_rows, colWidths=[38*mm, 137*mm], repeatRows=1)
+    rm_tbl.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),navy),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("GRID",(0,0),(-1,-1),0.25,colors.lightgrey),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.white]),
+        ("LEFTPADDING",(0,0),(-1,-1),4),
+        ("RIGHTPADDING",(0,0),(-1,-1),4),
+        ("TOPPADDING",(0,0),(-1,-1),3),
+        ("BOTTOMPADDING",(0,0),(-1,-1),3),
+    ]))
+    story.append(rm_tbl)
+
     story.append(PageBreak())
     story.append(_p(L["appendix"], h2))
 
@@ -606,8 +894,13 @@ def build_participant_pdf(lang: str, df_domains: pd.DataFrame, overall_0_100: fl
     return pdf_bytes
 
 
-def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
-                   legacy_logo_path: str, strategize_logo_path: str) -> bytes:
+def build_case_pdf(
+    lang: str,
+    case_meta: Dict[str, Any],
+    agg: Dict[str, Any],
+    legacy_logo_path: str,
+    strategize_logo_path: str
+) -> bytes:
     register_pdf_fonts()
 
     buf = BytesIO()
@@ -719,10 +1012,14 @@ def build_case_pdf(lang: str, case_meta: Dict[str, Any], agg: Dict[str, Any],
         story.append(_p("Higher standard deviation indicates lower alignment across respondents.", base))
         story.append(_p("<b>Top misalignment areas:</b> " + ", ".join(high_var["domain"].tolist()), base))
         story.append(_p("<b>Lowest maturity areas:</b> " + ", ".join(low_score["domain"].tolist()), base))
+        story.append(Spacer(1, 8))
+        story.append(_p(f"<b>Contact:</b> {CONTACT_EMAIL} | {CONTACT_WEB}", base))
     else:
         story.append(_p("Υψηλότερη τυπική απόκλιση σημαίνει χαμηλότερη ευθυγράμμιση μεταξύ των συμμετεχόντων.", base))
         story.append(_p("<b>Περιοχές με τη μεγαλύτερη απόκλιση:</b> " + ", ".join(high_var["domain"].tolist()), base))
         story.append(_p("<b>Χαμηλότερες βαθμολογίες ωριμότητας:</b> " + ", ".join(low_score["domain"].tolist()), base))
+        story.append(Spacer(1, 8))
+        story.append(_p(f"<b>Επικοινωνία:</b> {CONTACT_EMAIL} | {CONTACT_WEB}", base))
 
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
     pdf_bytes = buf.getvalue()
@@ -1094,7 +1391,41 @@ def participant_wizard():
     show["Risk"] = show["risk"].round(3)
     st.dataframe(show[["domain","Weight %","Avg (1–5)","Band","Risk"]], use_container_width=True, hide_index=True)
 
-    # PDF export (never crash even if fonts missing)
+    # Insights + Discussion Questions + CTA + Contact (UI)
+    ins = build_insights_next_steps_and_questions(lang, df)
+
+    st.markdown("### " + ins["headline"])
+    colA, colB = st.columns(2)
+
+    with colA:
+        st.markdown("**Key insights**" if lang == "EN" else "**Κύρια συμπεράσματα**")
+        for x in ins["key_insights"]:
+            st.write("• " + x)
+
+        st.markdown("**Implications for discussion**" if lang == "EN" else "**Επιπτώσεις προς συζήτηση**")
+        for x in ins["implications"]:
+            st.write("• " + x)
+
+    with colB:
+        st.markdown("**Recommended next steps**" if lang == "EN" else "**Προτεινόμενα επόμενα βήματα**")
+        for x in ins["next_steps"]:
+            st.write("• " + x)
+
+        st.markdown("**Next Actions & Recommendations**" if lang == "EN" else "**Σύνοψη Επόμενων Ενεργειών & Προτάσεων**")
+        for x in ins["cta"]:
+            st.write(x)
+
+    # Discussion Questions (UI) for RED/AMBER
+    dq_blocks = ins.get("dq_blocks") or []
+    if dq_blocks:
+        st.divider()
+        st.markdown("### " + (ins["dq_title"]))
+        for b in dq_blocks:
+            st.markdown(f"**{b['domain']}** — {BAND_LABELS[lang][b['band']]} ({b['avg_score']:.2f}/5)")
+            for q in b["questions"]:
+                st.write("• " + q)
+
+    # PDF export (includes insights, dq, roadmap)
     out_rows = []
     for q in QUESTIONS:
         out_rows.append({
