@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # legacy360_app.py
 # Legacy360° V1 — Streamlit single-file app
 # Participant wizard (token invites) + Admin dashboard (cases/invites/aggregation) + Premium PDFs
@@ -1547,5 +1548,6 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
+
 
 
