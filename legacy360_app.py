@@ -1051,7 +1051,7 @@ def db_participant_submit(raw_token: str, lang: str, answers_json: Dict[str, int
         "p_profile": profile_json,
         "p_derived": derived_json,
     }).execute()
-    # Add to Admin Inbox (best-effort; does not block participant flow)
+    # --- Admin Inbox (best-effort): create an unread entry for every new submission ---
     try:
         if res.data and isinstance(res.data, list) and res.data[0].get("submission_id"):
             sb_service = supabase_client(use_service_role=True)
@@ -1060,7 +1060,7 @@ def db_participant_submit(raw_token: str, lang: str, answers_json: Dict[str, int
                 on_conflict="submission_id"
             ).execute()
     except Exception:
-        # Do not break participant submission if inbox write fails
+        # Never block participant flow if inbox write fails
         pass
 
     return res.data
@@ -1126,112 +1126,103 @@ def header():
 
 
 
-# =========================================================
-# ADMIN INBOX (V1) — no email notifications
-# =========================================================
-
-def _safe_dict(v):
-    return v if isinstance(v, dict) else {}
-
-def admin_inbox(sb_service: Client) -> None:
+def admin_inbox(sb_service) -> None:
     """Admin Inbox tab (service role).
-    Robust to schema differences and shows actionable diagnostics instead of crashing.
+
+    Reads from:
+      - submissions (participant_id schema)
+      - admin_inbox (seen/unseen)
+
+    This is intentionally robust: if a Supabase/PostgREST query fails, we show the real message
+    inside the Admin UI instead of crashing the whole app.
     """
 
     st.subheader("📥 Inbox — Νέες Υποβολές / New Submissions")
 
-    unread_only = st.checkbox("Unread only", value=True)
-    days = st.selectbox("Period (days)", [1, 7, 30], index=1)
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col1:
+        unread_only = st.checkbox("Unread only", value=True)
+    with col2:
+        days = st.selectbox("Period (days)", [1, 7, 30], index=1)
+    with col3:
+        case_filter = st.text_input("Case filter (optional)")
+
     since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
 
-    # 1) Submissions (use participant_id; participant_email does NOT exist in your schema)
     try:
-        subs = (
+        q = (
             sb_service.table("submissions")
             .select("submission_id,case_id,participant_id,submitted_at,derived_json,profile_json,lang,questionnaire_version")
             .gte("submitted_at", since)
             .order("submitted_at", desc=True)
-            .execute()
-            .data or []
         )
+        if case_filter.strip():
+            q = q.eq("case_id", case_filter.strip())
+        subs = q.execute().data or []
     except Exception as e:
-        st.error("Admin Inbox failed while reading table: submissions")
-        st.caption("Most common cause: a column name mismatch. The error below is the real Supabase/PostgREST message.")
+        st.error("Inbox failed reading table: submissions")
+        st.caption("This is the real Supabase/PostgREST error:")
         st.code(str(e))
         return
 
     if not subs:
-        st.info("No submissions found for the selected period.")
+        st.info("No submissions found for the selected period/filter.")
         return
 
-    df_sub = pd.DataFrame(subs)
+    df = pd.DataFrame(subs)
 
-    # 2) Inbox status (admin_inbox may or may not exist yet)
     try:
         inbox_rows = (
             sb_service.table("admin_inbox")
             .select("submission_id,seen,seen_at,seen_by")
-            .in_("submission_id", df_sub["submission_id"].tolist())
+            .in_("submission_id", df["submission_id"].tolist())
             .execute()
             .data or []
         )
     except Exception as e:
-        st.error("Admin Inbox failed while reading table: admin_inbox")
-        st.caption("If this table is missing, create it via SQL Editor. Error message below:")
+        st.error("Inbox failed reading table: admin_inbox")
+        st.caption("If the table does not exist, create it in Supabase SQL Editor.")
         st.code(str(e))
-        st.info("Create table SQL (copy/paste in Supabase → SQL Editor):")
-        st.code(
-            """create table if not exists public.admin_inbox (
-  submission_id uuid primary key references public.submissions(submission_id) on delete cascade,
-  seen boolean not null default false,
-  seen_at timestamptz null,
-  seen_by text null,
-  created_at timestamptz not null default now()
-);
-create index if not exists idx_admin_inbox_seen on public.admin_inbox(seen);
-create index if not exists idx_admin_inbox_created_at on public.admin_inbox(created_at desc);
-""",
-            language="sql",
-        )
         return
 
-    df_in = pd.DataFrame(inbox_rows) if inbox_rows else pd.DataFrame(
-        columns=["submission_id", "seen", "seen_at", "seen_by"]
-    )
-    df = df_sub.merge(df_in, on="submission_id", how="left")
+    df_in = pd.DataFrame(inbox_rows) if inbox_rows else pd.DataFrame(columns=["submission_id", "seen", "seen_at", "seen_by"])
+    df = df.merge(df_in, on="submission_id", how="left")
     df["seen"] = df["seen"].fillna(False)
 
-    # Counters
-    unread_count = int((df["seen"] == False).sum())
-    st.caption(f"Recent submissions: {len(df_sub)} | Unread (recent): {unread_count}")
+    total_recent = len(df)
+    unread_recent = int((df["seen"] == False).sum())
+    st.caption(f"Recent: {total_recent} | Unread: {unread_recent}")
 
     if unread_only:
         df = df[df["seen"] == False]
 
-    # 3) Render cards
-    for _, row in df.iterrows():
-        derived = row.get("derived_json") or {}
-        profile = row.get("profile_json") or {}
-
+    for _, r in df.iterrows():
+        derived = r.get("derived_json") or {}
+        profile = r.get("profile_json") or {}
         overall = derived.get("overall", None)
         role = profile.get("role_category", "-")
         gen = profile.get("generation", "-")
-
-        pid = row.get("participant_id", "-")
-        who = str(pid)
+        pid = r.get("participant_id", "-")
 
         with st.container(border=True):
-            st.write(f"**Case:** `{row.get('case_id','-')}`  |  **Submission:** `{row.get('submission_id','-')}`")
-            st.write(f"**Participant:** {who}  |  **Role/Gen:** {role} / {gen}")
-            st.write(f"**Submitted:** {row.get('submitted_at','-')}  |  **Overall:** {overall if overall is not None else 'n/a'}")
-            st.caption(f"Lang: {row.get('lang','-')} | Questionnaire: {row.get('questionnaire_version','-')}")
+            st.write(f"**Case:** `{r.get('case_id', '-')}`  |  **Submission:** `{r.get('submission_id', '-')}`")
+            st.write(f"**Participant:** `{pid}`  |  **Role/Gen:** {role} / {gen}")
+            st.write(f"**Submitted:** {r.get('submitted_at', '-')}  |  **Overall:** {overall if overall is not None else 'n/a'}")
+            st.caption(f"Lang: {r.get('lang', '-')} | Questionnaire: {r.get('questionnaire_version', '-')}")
 
-            if not bool(row.get("seen", False)):
-                if st.button("Mark as read ✅", key=f"seen_{row['submission_id']}"):
-                    mark_admin_seen(sb_service, row["submission_id"], seen_by="admin")
-                    st.success("Marked as read.")
-                    st.rerun()
-
+            if not bool(r.get("seen", False)):
+                if st.button("Mark as read ✅", key=f"seen_{r.get('submission_id')}"):
+                    try:
+                        sb_service.table("admin_inbox").upsert({
+                            "submission_id": r.get("submission_id"),
+                            "seen": True,
+                            "seen_at": datetime.now(timezone.utc).isoformat(),
+                            "seen_by": "admin",
+                        }, on_conflict="submission_id").execute()
+                        st.rerun()
+                    except Exception as e:
+                        st.error("Failed to mark as read.")
+                        st.code(str(e))
 
 def admin_dashboard():
     header()
