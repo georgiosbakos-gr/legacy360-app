@@ -1127,15 +1127,12 @@ def header():
 
 
 def admin_inbox(sb_service: Client) -> None:
-    """Admin Inbox tab (service role) — safe + shows real PostgREST error."""
     st.subheader("📥 Inbox — New Submissions")
 
     unread_only = st.checkbox("Unread only", value=True)
     days = st.selectbox("Period (days)", [1, 7, 30], index=1)
-
     since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
 
-    # 1) Load submissions using only guaranteed columns in YOUR schema
     try:
         subs = (
             sb_service.table("submissions")
@@ -1148,7 +1145,6 @@ def admin_inbox(sb_service: Client) -> None:
         )
     except Exception as e:
         st.error("Admin Inbox failed while reading `submissions`.")
-        st.write("✅ This message is the real Supabase/PostgREST error (not redacted):")
         st.code(str(e))
         return
 
@@ -1158,7 +1154,6 @@ def admin_inbox(sb_service: Client) -> None:
 
     df = pd.DataFrame(subs)
 
-    # 2) Load admin_inbox status
     try:
         inbox = (
             sb_service.table("admin_inbox")
@@ -1170,9 +1165,7 @@ def admin_inbox(sb_service: Client) -> None:
         )
     except Exception as e:
         st.error("Admin Inbox failed while reading `admin_inbox`.")
-        st.write("✅ Real Supabase/PostgREST error:")
         st.code(str(e))
-        st.write("If it says table does not exist, create it in SQL Editor.")
         return
 
     df_in = pd.DataFrame(inbox) if inbox else pd.DataFrame(columns=["submission_id", "seen", "seen_at", "seen_by"])
@@ -1205,7 +1198,6 @@ def admin_inbox(sb_service: Client) -> None:
                     except Exception as e:
                         st.error("Failed to mark as read.")
                         st.code(str(e))
-
 
 def admin_dashboard():
     header()
@@ -1555,4 +1547,5 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
+
 
