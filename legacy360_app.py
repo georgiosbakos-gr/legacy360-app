@@ -1134,29 +1134,31 @@ def _safe_dict(v):
     return v if isinstance(v, dict) else {}
 
 def admin_inbox(sb_service: Client) -> None:
-    """Admin Inbox tab (service role)."""
+    """Admin Inbox tab (service role).
+    Robust to schema differences and shows actionable diagnostics instead of crashing.
+    """
 
-    st.subheader("📥 Inbox — New Submissions")
+    st.subheader("📥 Inbox — Νέες Υποβολές / New Submissions")
 
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        unread_only = st.checkbox("Unread only", value=True)
-    with c2:
-        days = st.selectbox("Period (days)", [1, 7, 30], index=1)
-    with c3:
-        seen_by = st.text_input("Seen by", value="admin")
-
+    unread_only = st.checkbox("Unread only", value=True)
+    days = st.selectbox("Period (days)", [1, 7, 30], index=1)
     since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
 
-    # Your schema uses participant_id (not participant_email) in submissions
-    subs = (
-        sb_service.table("submissions")
-        .select("submission_id,case_id,participant_id,submitted_at,derived_json,profile_json,lang,questionnaire_version")
-        .gte("submitted_at", since)
-        .order("submitted_at", desc=True)
-        .execute()
-        .data or []
-    )
+    # 1) Submissions (use participant_id; participant_email does NOT exist in your schema)
+    try:
+        subs = (
+            sb_service.table("submissions")
+            .select("submission_id,case_id,participant_id,submitted_at,derived_json,profile_json,lang,questionnaire_version")
+            .gte("submitted_at", since)
+            .order("submitted_at", desc=True)
+            .execute()
+            .data or []
+        )
+    except Exception as e:
+        st.error("Admin Inbox failed while reading table: submissions")
+        st.caption("Most common cause: a column name mismatch. The error below is the real Supabase/PostgREST message.")
+        st.code(str(e))
+        return
 
     if not subs:
         st.info("No submissions found for the selected period.")
@@ -1164,15 +1166,38 @@ def admin_inbox(sb_service: Client) -> None:
 
     df_sub = pd.DataFrame(subs)
 
-    inbox_rows = (
-        sb_service.table("admin_inbox")
-        .select("submission_id,seen,seen_at,seen_by")
-        .in_("submission_id", df_sub["submission_id"].tolist())
-        .execute()
-        .data or []
-    )
-    df_in = pd.DataFrame(inbox_rows) if inbox_rows else pd.DataFrame(columns=["submission_id","seen","seen_at","seen_by"])
+    # 2) Inbox status (admin_inbox may or may not exist yet)
+    try:
+        inbox_rows = (
+            sb_service.table("admin_inbox")
+            .select("submission_id,seen,seen_at,seen_by")
+            .in_("submission_id", df_sub["submission_id"].tolist())
+            .execute()
+            .data or []
+        )
+    except Exception as e:
+        st.error("Admin Inbox failed while reading table: admin_inbox")
+        st.caption("If this table is missing, create it via SQL Editor. Error message below:")
+        st.code(str(e))
+        st.info("Create table SQL (copy/paste in Supabase → SQL Editor):")
+        st.code(
+            """create table if not exists public.admin_inbox (
+  submission_id uuid primary key references public.submissions(submission_id) on delete cascade,
+  seen boolean not null default false,
+  seen_at timestamptz null,
+  seen_by text null,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_admin_inbox_seen on public.admin_inbox(seen);
+create index if not exists idx_admin_inbox_created_at on public.admin_inbox(created_at desc);
+""",
+            language="sql",
+        )
+        return
 
+    df_in = pd.DataFrame(inbox_rows) if inbox_rows else pd.DataFrame(
+        columns=["submission_id", "seen", "seen_at", "seen_by"]
+    )
     df = df_sub.merge(df_in, on="submission_id", how="left")
     df["seen"] = df["seen"].fillna(False)
 
@@ -1183,11 +1208,12 @@ def admin_inbox(sb_service: Client) -> None:
     if unread_only:
         df = df[df["seen"] == False]
 
+    # 3) Render cards
     for _, row in df.iterrows():
-        derived = _safe_dict(row.get("derived_json"))
-        profile = _safe_dict(row.get("profile_json"))
+        derived = row.get("derived_json") or {}
+        profile = row.get("profile_json") or {}
 
-        overall = derived.get("overall")
+        overall = derived.get("overall", None)
         role = profile.get("role_category", "-")
         gen = profile.get("generation", "-")
 
@@ -1196,23 +1222,16 @@ def admin_inbox(sb_service: Client) -> None:
 
         with st.container(border=True):
             st.write(f"**Case:** `{row.get('case_id','-')}`  |  **Submission:** `{row.get('submission_id','-')}`")
-            st.write(f"**Participant ID:** {who}  |  **Role/Gen:** {role} / {gen}")
+            st.write(f"**Participant:** {who}  |  **Role/Gen:** {role} / {gen}")
             st.write(f"**Submitted:** {row.get('submitted_at','-')}  |  **Overall:** {overall if overall is not None else 'n/a'}")
             st.caption(f"Lang: {row.get('lang','-')} | Questionnaire: {row.get('questionnaire_version','-')}")
 
             if not bool(row.get("seen", False)):
-                if st.button("Mark as read ✅", key=f"inbox_seen_{row['submission_id']}"):
-                    sb_service.table("admin_inbox").upsert(
-                        {
-                            "submission_id": row["submission_id"],
-                            "seen": True,
-                            "seen_at": datetime.now(timezone.utc).isoformat(),
-                            "seen_by": seen_by or "admin",
-                        },
-                        on_conflict="submission_id"
-                    ).execute()
+                if st.button("Mark as read ✅", key=f"seen_{row['submission_id']}"):
+                    mark_admin_seen(sb_service, row["submission_id"], seen_by="admin")
                     st.success("Marked as read.")
                     st.rerun()
+
 
 def admin_dashboard():
     header()
