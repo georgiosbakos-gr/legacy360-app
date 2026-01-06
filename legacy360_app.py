@@ -1040,13 +1040,9 @@ def db_participant_validate_invite(raw_token: str) -> Dict[str, Any]:
     row = res.data[0]
     return {"valid": True, "token_hash": token_hash, **row}
 
-
-def db_participant_submit(raw_token: str, lang: str, case_id: str, participant_email: str,
-                          answers_json: Dict[str, int], profile_json: Dict[str, Any], derived_json: Dict[str, Any]) -> Any:
-    """Submit participant assessment via RPC, then create an unread Admin Inbox item."""
+def db_participant_submit(raw_token: str, lang: str, answers_json: Dict[str, int], profile_json: Dict[str, Any], derived_json: Dict[str, Any]) -> Any:
     sb = supabase_client(use_service_role=False)
     token_hash = sha256_hex(raw_token)
-
     res = sb.rpc("submit_assessment", {
         "p_token_hash": token_hash,
         "p_lang": lang,
@@ -1055,29 +1051,20 @@ def db_participant_submit(raw_token: str, lang: str, case_id: str, participant_e
         "p_profile": profile_json,
         "p_derived": derived_json,
     }).execute()
-
-    # Try to get submission_id from RPC return; if not present, fetch latest submission for this participant/case.
-    submission_id = None
-    if res.data and isinstance(res.data, list):
-        submission_id = res.data[0].get("submission_id") or res.data[0].get("id")
-
-    if not submission_id:
-        sb_svc = supabase_client(use_service_role=True)
-        latest = (sb_svc.table("submissions")
-                  .select("submission_id")
-                  .eq("case_id", case_id)
-                  .eq("participant_email", participant_email)
-                  .order("submitted_at", desc=True)
-                  .limit(1)
-                  .execute()).data or []
-        if latest:
-            submission_id = latest[0]["submission_id"]
-
-    if submission_id:
-        sb_svc = supabase_client(use_service_role=True)
-        ensure_admin_inbox_row(sb_svc, submission_id)
+    # Add to Admin Inbox (best-effort; does not block participant flow)
+    try:
+        if res.data and isinstance(res.data, list) and res.data[0].get("submission_id"):
+            sb_service = supabase_client(use_service_role=True)
+            sb_service.table("admin_inbox").upsert(
+                {"submission_id": res.data[0]["submission_id"], "seen": False},
+                on_conflict="submission_id"
+            ).execute()
+    except Exception:
+        # Do not break participant submission if inbox write fails
+        pass
 
     return res.data
+
 def db_admin_list_cases(limit: int = 200) -> List[Dict[str, Any]]:
     sb = supabase_client(use_service_role=True)
     res = sb.table("cases").select("*").order("created_at", desc=True).limit(limit).execute()
@@ -1139,111 +1126,94 @@ def header():
 
 
 
-
 # =========================================================
-# ADMIN INBOX (V1) — view submissions without email
+# ADMIN INBOX (V1) — no email notifications
 # =========================================================
 
-def ensure_admin_inbox_row(sb: Client, submission_id: str) -> None:
-    """Create an unread inbox row for a submission (idempotent)."""
-    sb.table("admin_inbox").upsert(
-        {"submission_id": submission_id, "seen": False},
-        on_conflict="submission_id"
-    ).execute()
-
-def mark_admin_inbox_seen(sb: Client, submission_id: str, seen_by: str = "admin") -> None:
-    sb.table("admin_inbox").upsert(
-        {
-            "submission_id": submission_id,
-            "seen": True,
-            "seen_at": datetime.now(timezone.utc).isoformat(),
-            "seen_by": seen_by or "admin",
-        },
-        on_conflict="submission_id"
-    ).execute()
+def _safe_dict(v):
+    return v if isinstance(v, dict) else {}
 
 def admin_inbox(sb_service: Client) -> None:
     """Admin Inbox tab (service role)."""
+
     st.subheader("📥 Inbox — New Submissions")
+
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         unread_only = st.checkbox("Unread only", value=True)
     with c2:
         days = st.selectbox("Period (days)", [1, 7, 30], index=1)
     with c3:
-        seen_by = st.text_input("Seen by (optional)", value="admin")
+        seen_by = st.text_input("Seen by", value="admin")
 
     since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
 
-    # Pull submissions (keep this conservative: these columns exist in our schema)
-    try:
-        subs = (
-            sb_service.table("submissions")
-            .select("submission_id,case_id,participant_email,submitted_at,derived_json,profile_json")
-            .gte("submitted_at", since)
-            .order("submitted_at", desc=True)
-            .execute()
-            .data
-            or []
-        )
-    except Exception as e:
-        st.error("Cannot load submissions (schema/columns issue).")
-        st.code(str(e))
-        return
+    # Your schema uses participant_id (not participant_email) in submissions
+    subs = (
+        sb_service.table("submissions")
+        .select("submission_id,case_id,participant_id,submitted_at,derived_json,profile_json,lang,questionnaire_version")
+        .gte("submitted_at", since)
+        .order("submitted_at", desc=True)
+        .execute()
+        .data or []
+    )
 
     if not subs:
-        st.info("No submissions in selected period.")
+        st.info("No submissions found for the selected period.")
         return
 
     df_sub = pd.DataFrame(subs)
-    ids = df_sub["submission_id"].tolist()
 
-    try:
-        inbox_rows = (
-            sb_service.table("admin_inbox")
-            .select("submission_id,seen,seen_at,seen_by")
-            .in_("submission_id", ids)
-            .execute()
-            .data
-            or []
-        )
-    except Exception as e:
-        st.error("Cannot load admin_inbox table. Ensure it exists in Supabase.")
-        st.code(str(e))
-        return
+    inbox_rows = (
+        sb_service.table("admin_inbox")
+        .select("submission_id,seen,seen_at,seen_by")
+        .in_("submission_id", df_sub["submission_id"].tolist())
+        .execute()
+        .data or []
+    )
+    df_in = pd.DataFrame(inbox_rows) if inbox_rows else pd.DataFrame(columns=["submission_id","seen","seen_at","seen_by"])
 
-    df_in = pd.DataFrame(inbox_rows) if inbox_rows else pd.DataFrame(columns=["submission_id", "seen", "seen_at", "seen_by"])
     df = df_sub.merge(df_in, on="submission_id", how="left")
     df["seen"] = df["seen"].fillna(False)
 
     # Counters
-    unread_cnt = int((df["seen"] == False).sum())
-    st.caption(f"Recent submissions: {len(df_sub)} | Unread: {unread_cnt}")
+    unread_count = int((df["seen"] == False).sum())
+    st.caption(f"Recent submissions: {len(df_sub)} | Unread (recent): {unread_count}")
 
     if unread_only:
         df = df[df["seen"] == False]
 
     for _, row in df.iterrows():
-        derived = row.get("derived_json") or {}
-        profile = row.get("profile_json") or {}
+        derived = _safe_dict(row.get("derived_json"))
+        profile = _safe_dict(row.get("profile_json"))
 
-        overall = derived.get("overall", None)
+        overall = derived.get("overall")
         role = profile.get("role_category", "-")
         gen = profile.get("generation", "-")
 
+        pid = row.get("participant_id", "-")
+        who = str(pid)
+
         with st.container(border=True):
             st.write(f"**Case:** `{row.get('case_id','-')}`  |  **Submission:** `{row.get('submission_id','-')}`")
-            st.write(f"**Participant:** {row.get('participant_email','-')}  |  **Role/Gen:** {role} / {gen}")
+            st.write(f"**Participant ID:** {who}  |  **Role/Gen:** {role} / {gen}")
             st.write(f"**Submitted:** {row.get('submitted_at','-')}  |  **Overall:** {overall if overall is not None else 'n/a'}")
+            st.caption(f"Lang: {row.get('lang','-')} | Questionnaire: {row.get('questionnaire_version','-')}")
 
-            b1, b2 = st.columns([1, 2])
-            with b1:
-                if st.button("Mark as read ✅", key=f"seen_{row['submission_id']}"):
-                    mark_admin_inbox_seen(sb_service, row["submission_id"], seen_by=seen_by)
+            if not bool(row.get("seen", False)):
+                if st.button("Mark as read ✅", key=f"inbox_seen_{row['submission_id']}"):
+                    sb_service.table("admin_inbox").upsert(
+                        {
+                            "submission_id": row["submission_id"],
+                            "seen": True,
+                            "seen_at": datetime.now(timezone.utc).isoformat(),
+                            "seen_by": seen_by or "admin",
+                        },
+                        on_conflict="submission_id"
+                    ).execute()
                     st.success("Marked as read.")
                     st.rerun()
-            with b2:
-                st.code(f"Use this Case ID in Aggregation: {row.get('case_id','-')}", language="text")
+
 def admin_dashboard():
     header()
     st.subheader("Admin Access")
@@ -1264,16 +1234,16 @@ def admin_dashboard():
 
     tabs = st.tabs(["📥 Inbox", "Cases", "Create Case", "Invites", "Aggregation"])
 
-with tabs[0]:
-    sb_service = supabase_client(use_service_role=True)
-    admin_inbox(sb_service)
+    with tabs[0]:
+        sb_service = supabase_client(use_service_role=True)
+        admin_inbox(sb_service)
 
 
-    with tabs[4]:
+    with tabs[1]:
         cases = db_admin_list_cases()
         st.dataframe(pd.DataFrame(cases), use_container_width=True, hide_index=True)
 
-    with tabs[4]:
+    with tabs[2]:
         company_name = st.text_input("Company name")
         industry = st.text_input("Industry")
         country = st.text_input("Country")
@@ -1290,7 +1260,7 @@ with tabs[0]:
             })
             st.success(f"Created case_id: {case_id}")
 
-    with tabs[4]:
+    with tabs[3]:
         case_id = st.text_input("Case ID (uuid)")
         email = st.text_input("Participant email")
         expires_days = st.number_input("Expires in days", min_value=1, max_value=60, value=14)
@@ -1510,7 +1480,7 @@ def participant_wizard():
                     "overall": float(overall)
                 }
                 try:
-                    db_participant_submit(token, lang, case_id, participant_email, answers_json, profile_json, derived_json)
+                    db_participant_submit(token, lang, answers_json, profile_json, derived_json)
                     st.session_state["submitted"] = True
                     st.success(UI[lang]["submitted_ok"])
                     st.rerun()
