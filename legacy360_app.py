@@ -1126,103 +1126,86 @@ def header():
 
 
 
-def admin_inbox(sb_service) -> None:
-    """Admin Inbox tab (service role).
+def admin_inbox(sb_service: Client) -> None:
+    """Admin Inbox tab (service role) — safe + shows real PostgREST error."""
+    st.subheader("📥 Inbox — New Submissions")
 
-    Reads from:
-      - submissions (participant_id schema)
-      - admin_inbox (seen/unseen)
-
-    This is intentionally robust: if a Supabase/PostgREST query fails, we show the real message
-    inside the Admin UI instead of crashing the whole app.
-    """
-
-    st.subheader("📥 Inbox — Νέες Υποβολές / New Submissions")
-
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        unread_only = st.checkbox("Unread only", value=True)
-    with col2:
-        days = st.selectbox("Period (days)", [1, 7, 30], index=1)
-    with col3:
-        case_filter = st.text_input("Case filter (optional)")
+    unread_only = st.checkbox("Unread only", value=True)
+    days = st.selectbox("Period (days)", [1, 7, 30], index=1)
 
     since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
 
+    # 1) Load submissions using only guaranteed columns in YOUR schema
     try:
-        q = (
+        subs = (
             sb_service.table("submissions")
-            .select("submission_id,case_id,participant_id,submitted_at,derived_json,profile_json,lang,questionnaire_version")
+            .select("submission_id,case_id,participant_id,submitted_at")
             .gte("submitted_at", since)
             .order("submitted_at", desc=True)
+            .execute()
+            .data
+            or []
         )
-        if case_filter.strip():
-            q = q.eq("case_id", case_filter.strip())
-        subs = q.execute().data or []
     except Exception as e:
-        st.error("Inbox failed reading table: submissions")
-        st.caption("This is the real Supabase/PostgREST error:")
+        st.error("Admin Inbox failed while reading `submissions`.")
+        st.write("✅ This message is the real Supabase/PostgREST error (not redacted):")
         st.code(str(e))
         return
 
     if not subs:
-        st.info("No submissions found for the selected period/filter.")
+        st.info("No submissions for selected period.")
         return
 
     df = pd.DataFrame(subs)
 
+    # 2) Load admin_inbox status
     try:
-        inbox_rows = (
+        inbox = (
             sb_service.table("admin_inbox")
             .select("submission_id,seen,seen_at,seen_by")
             .in_("submission_id", df["submission_id"].tolist())
             .execute()
-            .data or []
+            .data
+            or []
         )
     except Exception as e:
-        st.error("Inbox failed reading table: admin_inbox")
-        st.caption("If the table does not exist, create it in Supabase SQL Editor.")
+        st.error("Admin Inbox failed while reading `admin_inbox`.")
+        st.write("✅ Real Supabase/PostgREST error:")
         st.code(str(e))
+        st.write("If it says table does not exist, create it in SQL Editor.")
         return
 
-    df_in = pd.DataFrame(inbox_rows) if inbox_rows else pd.DataFrame(columns=["submission_id", "seen", "seen_at", "seen_by"])
+    df_in = pd.DataFrame(inbox) if inbox else pd.DataFrame(columns=["submission_id", "seen", "seen_at", "seen_by"])
     df = df.merge(df_in, on="submission_id", how="left")
     df["seen"] = df["seen"].fillna(False)
-
-    total_recent = len(df)
-    unread_recent = int((df["seen"] == False).sum())
-    st.caption(f"Recent: {total_recent} | Unread: {unread_recent}")
 
     if unread_only:
         df = df[df["seen"] == False]
 
     for _, r in df.iterrows():
-        derived = r.get("derived_json") or {}
-        profile = r.get("profile_json") or {}
-        overall = derived.get("overall", None)
-        role = profile.get("role_category", "-")
-        gen = profile.get("generation", "-")
-        pid = r.get("participant_id", "-")
-
         with st.container(border=True):
-            st.write(f"**Case:** `{r.get('case_id', '-')}`  |  **Submission:** `{r.get('submission_id', '-')}`")
-            st.write(f"**Participant:** `{pid}`  |  **Role/Gen:** {role} / {gen}")
-            st.write(f"**Submitted:** {r.get('submitted_at', '-')}  |  **Overall:** {overall if overall is not None else 'n/a'}")
-            st.caption(f"Lang: {r.get('lang', '-')} | Questionnaire: {r.get('questionnaire_version', '-')}")
+            st.write(f"**Case:** `{r.get('case_id','-')}`  |  **Submission:** `{r.get('submission_id','-')}`")
+            st.write(f"**Participant ID:** `{r.get('participant_id','-')}`")
+            st.write(f"**Submitted:** {r.get('submitted_at','-')}")
 
             if not bool(r.get("seen", False)):
-                if st.button("Mark as read ✅", key=f"seen_{r.get('submission_id')}"):
+                if st.button("Mark as read ✅", key=f"seen_{r['submission_id']}"):
                     try:
-                        sb_service.table("admin_inbox").upsert({
-                            "submission_id": r.get("submission_id"),
-                            "seen": True,
-                            "seen_at": datetime.now(timezone.utc).isoformat(),
-                            "seen_by": "admin",
-                        }, on_conflict="submission_id").execute()
+                        sb_service.table("admin_inbox").upsert(
+                            {
+                                "submission_id": r["submission_id"],
+                                "seen": True,
+                                "seen_at": datetime.now(timezone.utc).isoformat(),
+                                "seen_by": "admin",
+                            },
+                            on_conflict="submission_id"
+                        ).execute()
+                        st.success("Marked as read.")
                         st.rerun()
                     except Exception as e:
                         st.error("Failed to mark as read.")
                         st.code(str(e))
+
 
 def admin_dashboard():
     header()
@@ -1572,3 +1555,4 @@ if is_admin:
     admin_dashboard()
 else:
     participant_wizard()
+
